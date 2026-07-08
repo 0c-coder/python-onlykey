@@ -11,7 +11,12 @@ import hashlib
 import os
 import codecs
 
-import hid
+try:
+    # Prefer the hidraw-backed module on Linux to avoid hid "open failed" races
+    # when the OnlyKey HID interface was just used by another app (e.g. KeePassXC).
+    import hidraw as hid
+except ImportError:
+    import hid
 from aenum import Enum
 from sys import platform
 

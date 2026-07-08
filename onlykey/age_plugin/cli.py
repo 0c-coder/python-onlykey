@@ -18,8 +18,11 @@ Decryption:
 import sys
 import os
 import base64
+import hashlib
 
-from onlykey.age_plugin import __version__, PLUGIN_NAME, SLOT_XWING
+from onlykey.age_plugin import (
+    __version__, PLUGIN_NAME, DEFAULT_XWING_SLOT, validate_ecc_slot,
+)
 from onlykey.age_plugin.protocol import (
     Stanza, b64encode_no_pad, b64decode_no_pad,
     run_identity_v1, run_recipient_v1,
@@ -111,6 +114,12 @@ def bech32_decode(bech: str):
 RECIPIENT_HRP = "age1onlykey"
 IDENTITY_HRP = "age-plugin-onlykey-"  # uppercase AGE-PLUGIN-ONLYKEY- in file
 
+IDENTITY_VERSION = 1
+IDENTITY_FINGERPRINT_LEN = 8
+XWING_RECIPIENT_LEN = 1216
+XWING_STANZA_ENC_LEN = 1120
+FILE_KEY_LEN = 32
+
 
 def encode_recipient(pubkey: bytes) -> str:
     """Encode X-Wing public key as age recipient string."""
@@ -125,7 +134,12 @@ def decode_recipient(recipient: str) -> bytes:
     return data
 
 
-def encode_identity(slot: int = SLOT_XWING) -> str:
+def recipient_fingerprint(pubkey: bytes) -> bytes:
+    """Return a short fingerprint for identity binding."""
+    return hashlib.sha256(pubkey).digest()[:IDENTITY_FINGERPRINT_LEN]
+
+
+def encode_identity(slot: int = DEFAULT_XWING_SLOT) -> str:
     """Encode an identity string. Contains just the slot number."""
     # Identity data: just the slot byte
     data = bytes([slot])
@@ -135,26 +149,52 @@ def encode_identity(slot: int = SLOT_XWING) -> str:
     )
 
 
-def decode_identity(identity: str) -> int:
-    """Decode identity string, returns slot number."""
+def decode_identity(identity: str) -> dict:
+    """Decode identity string.
+
+    Returns a mapping with ``slot``, ``fingerprint``, and ``legacy`` keys.
+    Legacy one-byte identities are supported so older files continue to work.
+    """
     hrp, data = bech32_decode(identity.lower())
-    if data is None or len(data) < 1:
+    if hrp != IDENTITY_HRP or data is None or len(data) < 1:
         raise ValueError(f"Invalid OnlyKey identity: {identity}")
-    return data[0]
+
+    if len(data) == 1:
+        return {
+            "slot": data[0],
+            "fingerprint": None,
+            "legacy": True,
+        }
+
+    if len(data) != 2 + IDENTITY_FINGERPRINT_LEN:
+        raise ValueError(
+            f"Invalid OnlyKey identity payload length: {len(data)}"
+        )
+
+    version = data[0]
+    if version != IDENTITY_VERSION:
+        raise ValueError(f"Unsupported OnlyKey identity version: {version}")
+
+    return {
+        "slot": data[1],
+        "fingerprint": data[2:],
+        "legacy": False,
+    }
 
 
-def cmd_generate():
+
+def cmd_generate(slot: int = DEFAULT_XWING_SLOT):
     """Generate X-Wing keypair on OnlyKey and print recipient/identity."""
     from onlykey.age_plugin.onlykey_hid import OnlyKeyPQ
 
-    print("Generating X-Wing keypair on OnlyKey...", file=sys.stderr)
+    print(f"Generating X-Wing keypair on OnlyKey (ECC slot {slot})...", file=sys.stderr)
     dev = OnlyKeyPQ()
-    pk = dev.xwing_keygen()
+    pk = dev.xwing_keygen(slot)
 
     recipient = encode_recipient(pk)
-    identity = encode_identity(SLOT_XWING)
+    identity = encode_identity(slot)
 
-    print(f"# X-Wing public key (age v1.3.0 mlkem768x25519 compatible)", file=sys.stderr)
+    print("# X-Wing public key (produces native age mlkem768x25519 stanzas)", file=sys.stderr)
     print(f"# Recipient: {recipient}", file=sys.stderr)
     print(file=sys.stderr)
 
@@ -164,20 +204,30 @@ def cmd_generate():
     print(identity)
 
 
-def cmd_recipient():
-    """Print the current X-Wing public key as an age recipient."""
+def cmd_recipient(slot: int = DEFAULT_XWING_SLOT):
+    """Print the X-Wing public key in the given ECC slot as an age recipient."""
     from onlykey.age_plugin.onlykey_hid import OnlyKeyPQ
 
     dev = OnlyKeyPQ()
-    pk = dev.xwing_getpubkey()
+    pk = dev.xwing_getpubkey(slot)
     print(encode_recipient(pk))
 
 
-def cmd_identity():
+def cmd_identity(slot: int = DEFAULT_XWING_SLOT):
     """Print an identity file for use with age -i."""
-    identity = encode_identity(SLOT_XWING)
-    print(f"# age-plugin-onlykey identity (X-Wing slot {SLOT_XWING})")
+    identity = encode_identity(slot)
+    print(f"# age-plugin-onlykey identity (X-Wing ECC slot {slot})")
     print(identity)
+
+
+def _parse_onlykey_identities(identities):
+    parsed = []
+    for identity in identities:
+        try:
+            parsed.append(decode_identity(identity))
+        except ValueError:
+            continue
+    return parsed
 
 
 def unwrap_callback(identities, stanzas_per_file):
@@ -186,7 +236,41 @@ def unwrap_callback(identities, stanzas_per_file):
     from onlykey.age_plugin.xwing import open_file_key
 
     results = []
-    dev = None
+    parsed_identities = _parse_onlykey_identities(identities)
+    if not parsed_identities:
+        print("No valid OnlyKey identity supplied.", file=sys.stderr)
+        return results
+
+    dev = OnlyKeyPQ()
+
+    # The identity carries the ECC slot the key lives in; any of the 32 ECC
+    # slots (101-132) is valid. Query that slot's public key and match it.
+    matching_identity = None
+    matching_slot = None
+    for identity in parsed_identities:
+        try:
+            slot = validate_ecc_slot(identity["slot"])
+        except ValueError:
+            continue
+        try:
+            device_pubkey = dev.xwing_getpubkey(slot)
+        except Exception as exc:
+            print(f"Could not read X-Wing key in slot {slot}: {exc}", file=sys.stderr)
+            continue
+        if len(device_pubkey) != XWING_RECIPIENT_LEN:
+            continue
+        if (identity["fingerprint"] is None
+                or identity["fingerprint"] == recipient_fingerprint(device_pubkey)):
+            matching_identity = identity
+            matching_slot = slot
+            break
+
+    if matching_identity is None:
+        print(
+            "OnlyKey identity does not match the connected device's X-Wing public key.",
+            file=sys.stderr,
+        )
+        return results
 
     for file_idx, stanzas in stanzas_per_file.items():
         for stanza in stanzas:
@@ -195,27 +279,32 @@ def unwrap_callback(identities, stanzas_per_file):
                 continue
 
             if len(stanza.args) != 1:
-                continue
+                raise ValueError(
+                    f"Malformed mlkem768x25519 stanza: expected 1 arg, got {len(stanza.args)}"
+                )
 
             # Parse the ciphertext from the stanza argument
             try:
                 enc = b64decode_no_pad(stanza.args[0])
-            except Exception:
-                continue
+            except Exception as exc:
+                raise ValueError(
+                    "Malformed mlkem768x25519 stanza: invalid base64 ciphertext"
+                ) from exc
 
-            if len(enc) != 1120:
-                continue
+            if len(enc) != XWING_STANZA_ENC_LEN:
+                raise ValueError(
+                    f"Malformed mlkem768x25519 stanza: ciphertext must be {XWING_STANZA_ENC_LEN} bytes, got {len(enc)}"
+                )
 
             # Body must be exactly 32 bytes
-            if len(stanza.body) != 32:
-                continue
+            if len(stanza.body) != FILE_KEY_LEN:
+                raise ValueError(
+                    f"Malformed mlkem768x25519 stanza body: expected {FILE_KEY_LEN} bytes, got {len(stanza.body)}"
+                )
 
-            # Connect to OnlyKey if not already
-            if dev is None:
-                dev = OnlyKeyPQ()
 
-            # Send ciphertext to OnlyKey for decapsulation
-            ss = dev.xwing_decaps(enc)
+            # Send ciphertext to OnlyKey for decapsulation (in the matched slot)
+            ss = dev.xwing_decaps(enc, slot=matching_slot)
 
             # Use shared secret to decrypt the file key via HPKE
             try:
@@ -281,13 +370,26 @@ def main():
                 print(f"Unknown state machine: {state_machine}", file=sys.stderr)
                 sys.exit(1)
 
+    # Optional --slot N / --slot=N selects which ECC slot (101-132) holds the key.
+    slot = DEFAULT_XWING_SLOT
+    for i, arg in enumerate(args):
+        if arg == "--slot" and i + 1 < len(args):
+            slot = args[i + 1]
+        elif arg.startswith("--slot="):
+            slot = arg.split("=", 1)[1]
+    try:
+        slot = validate_ecc_slot(slot)
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     # Direct invocation modes
     if "--generate" in args or "-g" in args:
-        cmd_generate()
+        cmd_generate(slot)
     elif "--recipient" in args or "-r" in args:
-        cmd_recipient()
+        cmd_recipient(slot)
     elif "--identity" in args or "-i" in args:
-        cmd_identity()
+        cmd_identity(slot)
     elif "--version" in args or "-v" in args:
         print(f"age-plugin-onlykey {__version__}")
     elif "--help" in args or "-h" in args:
@@ -301,6 +403,7 @@ def main():
         print("  --generate    Generate X-Wing keypair on OnlyKey")
         print("  --recipient   Print recipient (public key) for encryption")
         print("  --identity    Print identity file for decryption")
+        print("  --slot N      User ECC slot 101-116 to use (default 101)")
         print("  --help        Show full help")
         print()
         print("Quick start:")
