@@ -87,8 +87,10 @@ def load_composite_key(ok, slot, blob):
     blob = bytes(blob)
     for i in range(0, PQC_PGP_BLOB_LEN, 57):
         chunk = blob[i:i + 57]
+        # send_message accepts str(hex)/list/bytearray/int — NOT bytes — so frame
+        # the payload as a bytearray: [key_type] + 57-byte chunk (key_type -> buffer[6]).
         ok.send_message(msg=Message.OKSETPRIV, slot_id=slot,
-                        payload=bytes([PQC_KEY_TYPE_BYTE]) + chunk)
+                        payload=bytearray([PQC_KEY_TYPE_BYTE]) + bytearray(chunk))
 
 
 def decrypt(ok, slot, data):

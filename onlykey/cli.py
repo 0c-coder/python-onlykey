@@ -418,6 +418,32 @@ def cli():
                 print(sys.exc_info()[0])
                 print('Input error. See available commands with examples here https://docs.crp.to/command-line.html')
                 return
+        elif sys.argv[1] == 'setpqc':
+            # Load a composite PQC PGP key (IETF OpenPGP-PQC) into an RSA slot.
+            # setpqc [RSA1-RSA4] [160-byte hex blob | path to .hex/.bin file]
+            # blob layout (see onlykey/pqc.py): Ed25519(32)|ML-DSA seed(32)|X25519(32)|ML-KEM seed(64)
+            try:
+                from . import pqc
+                slotmap = {'RSA1': 1, 'RSA2': 2, 'RSA3': 3, 'RSA4': 4}
+                slot_id = slotmap.get(sys.argv[2])
+                if not slot_id:
+                    print('setpqc [RSA1-RSA4] [160-byte hex blob | file]')
+                    return
+                arg = sys.argv[3]
+                if os.path.isfile(arg):
+                    raw = open(arg, 'rb').read()
+                    try:
+                        blob = bytes.fromhex(raw.decode().strip())
+                    except Exception:
+                        blob = raw
+                else:
+                    blob = bytes.fromhex(arg.strip())
+                pqc.load_composite_key(only_key, slot_id, blob)
+                print('Loaded composite PQC PGP key (%d bytes) into %s' % (len(blob), sys.argv[2]))
+            except Exception:
+                print(sys.exc_info()[0])
+                print('setpqc [RSA1-RSA4] [160-byte hex blob | file]')
+                return
         elif sys.argv[1] == 'wipekey':
             try:
                 if sys.argv[2] == 'RSA1':
