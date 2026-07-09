@@ -610,21 +610,26 @@ class OnlyKey(object):
             slot: Key slot number (1-4 for RSA, 101-116 for ECC, or 99 for auto)
             key_features: 'd' for decryption, 's' for signing, 'b' for backup
         """
-        try:
-            import pgpy
-        except ImportError:
-            raise RuntimeError('pgpy is required for loading PGP keys. Install with: pip install pgpy')
-
-        (rootkey, _) = pgpy.PGPKey.from_blob(key_ascii_armor)
-
-        if rootkey.is_protected:
-            try:
-                with rootkey.unlock(passphrase):
-                    return self._process_pgp_key(rootkey, slot, key_features)
-            except Exception as e:
-                raise RuntimeError('Failed to unlock PGP key: {}'.format(str(e)))
-        else:
-            return self._process_pgp_key(rootkey, slot, key_features)
+        from . import pgp_bridge
+        parsed = pgp_bridge.parse_armored(key_ascii_armor, passphrase)
+        if parsed.get('type') == 'pqc-composite':
+            raise RuntimeError(
+                'This is a composite PQC PGP key. Load it with '
+                '`onlykey-cli loadpqc <keyfile> RSA1` (it goes into an RSA slot as a '
+                '160-byte seed), not loadkey.')
+        keys = []
+        is_ecc = (parsed.get('type') == 'ecc')
+        ecc_curve = 0
+        for k in parsed.get('keys', []):
+            if k.get('kind') == 'rsa':
+                keys.append({'name': k['name'],
+                             'p': binascii.unhexlify(k['p']),
+                             'q': binascii.unhexlify(k['q'])})
+            else:
+                if not ecc_curve:
+                    ecc_curve = k.get('curve', 0)
+                keys.append({'name': k['name'], 's': binascii.unhexlify(k['s'])})
+        return self._load_parsed_keys(keys, is_ecc, ecc_curve, slot, key_features)
 
     def _long_to_bytes(self, n):
         """Convert a long integer to a byte string."""
@@ -632,84 +637,11 @@ class OnlyKey(object):
         s = binascii.unhexlify(('0' * (len(h) % 2) + h))
         return s
 
-    def _process_pgp_key(self, rootkey, slot, key_features):
-        """Process an unlocked PGP key and load it onto the OnlyKey."""
-        keys = []
-        is_ecc = False
-        ecc_curve = 0
+    def _load_parsed_keys(self, keys, is_ecc, ecc_curve, slot, key_features):
+        """Load key material already parsed by pgp_bridge (OpenPGP.js) onto the OnlyKey.
 
-        algo_name = rootkey._key._pkalg._name_ if hasattr(rootkey._key._pkalg, '_name_') else str(rootkey._key._pkalg)
-
-        if 'RSA' in algo_name:
-            # RSA key - extract p and q
-            primary_p = self._long_to_bytes(rootkey._key.keymaterial.p)
-            primary_q = self._long_to_bytes(rootkey._key.keymaterial.q)
-            keys.append({
-                'name': 'Primary Key',
-                'p': primary_p,
-                'q': primary_q
-            })
-            # Process subkeys
-            for subkey_id, subkey in rootkey._children.items():
-                sub_algo = subkey._key._pkalg._name_ if hasattr(subkey._key._pkalg, '_name_') else str(subkey._key._pkalg)
-                if 'RSA' in sub_algo:
-                    sub_p = self._long_to_bytes(subkey._key.keymaterial.p)
-                    sub_q = self._long_to_bytes(subkey._key.keymaterial.q)
-                    keys.append({
-                        'name': 'Subkey {}'.format(subkey_id),
-                        'p': sub_p,
-                        'q': sub_q
-                    })
-                elif hasattr(subkey._key.keymaterial, 's'):
-                    is_ecc = True
-                    sub_s = self._long_to_bytes(subkey._key.keymaterial.s)
-                    keys.append({
-                        'name': 'Subkey {}'.format(subkey_id),
-                        's': sub_s
-                    })
-        elif 'EdDSA' in algo_name or 'ed25519' in algo_name.lower():
-            is_ecc = True
-            ecc_curve = 1  # Ed25519
-            primary_s = self._long_to_bytes(rootkey._key.keymaterial.s)
-            keys.append({
-                'name': 'Primary Key',
-                's': primary_s
-            })
-            for subkey_id, subkey in rootkey._children.items():
-                sub_s = self._long_to_bytes(subkey._key.keymaterial.s)
-                keys.append({
-                    'name': 'Subkey {}'.format(subkey_id),
-                    's': sub_s
-                })
-        elif 'ECDSA' in algo_name or 'ECDH' in algo_name:
-            is_ecc = True
-            # Determine curve from OID
-            if hasattr(rootkey._key.keymaterial, 'oid'):
-                oid = rootkey._key.keymaterial.oid
-                oid_str = str(oid) if not isinstance(oid, str) else oid
-                if 'nistp256' in oid_str or '1.2.840.10045.3.1.7' in oid_str:
-                    ecc_curve = 2  # NIST P-256
-                elif 'secp256k1' in oid_str or '1.3.132.0.10' in oid_str:
-                    ecc_curve = 3  # secp256k1
-                elif 'curve25519' in oid_str or '1.3.6.1.4.1.3029.1.5.1' in oid_str:
-                    ecc_curve = 4  # Curve25519
-                else:
-                    ecc_curve = 1  # Default to Ed25519
-            else:
-                ecc_curve = 2  # Default to P-256 for ECDSA
-            primary_s = self._long_to_bytes(rootkey._key.keymaterial.s)
-            keys.append({
-                'name': 'Primary Key',
-                's': primary_s
-            })
-            for subkey_id, subkey in rootkey._children.items():
-                sub_s = self._long_to_bytes(subkey._key.keymaterial.s)
-                keys.append({
-                    'name': 'Subkey {}'.format(subkey_id),
-                    's': sub_s
-                })
-        else:
-            raise RuntimeError('Unsupported key algorithm: {}'.format(algo_name))
+        keys: list of {'name', 'p','q' (RSA, bytes)} or {'name', 's' (ECC, bytes)}.
+        """
 
         if not keys:
             raise RuntimeError('No keys found in PGP key')
@@ -1125,53 +1057,20 @@ class OnlyKey(object):
         """Legacy method - parse and display private keys from OpenPGP keys.
 
         For actually loading keys onto the device, use loadkey() instead.
+        Parses via the OpenPGP.js bridge (pgp_bridge); handles RSA, ECC, and
+        composite PQC keys.
         """
-        try:
-            import pgpy
-        except ImportError:
-            raise RuntimeError('pgpy is required. Install with: pip install pgpy')
-
-        (rootkey, _) = pgpy.PGPKey.from_blob(rootkey_ascii_armor)
-
-        assert rootkey.is_protected
-        assert rootkey.is_unlocked is False
-
-        try:
-            with rootkey.unlock(rootkey_passphrase):
-                # rootkey is now unlocked
-                assert rootkey.is_unlocked
-                print('rootkey is now unlocked')
-                print('rootkey type %s', rootkey._key._pkalg)
-                if 'RSA' in rootkey._key._pkalg._name_:
-                    print('rootkey value:')
-                    primary_keyp = self._long_to_bytes(rootkey._key.keymaterial.p)
-                    primary_keyq = self._long_to_bytes(rootkey._key.keymaterial.q)
-                    print(("".join(["%02x" % c for c in primary_keyp])) + ("".join(["%02x" % c for c in primary_keyq])))
-                    print('rootkey size =', (len(primary_keyp)+len(primary_keyq))*8, 'bits')
-                    print('subkey values:')
-                    for subkey, value in rootkey._children.items():
-                        print('subkey id', subkey)
-                        sub_keyp = self._long_to_bytes(value._key.keymaterial.p)
-                        sub_keyq = self._long_to_bytes(value._key.keymaterial.q)
-                        print('subkey value')
-                        print(("".join(["%02x" % c for c in sub_keyp])) + ("".join(["%02x" % c for c in sub_keyq])))
-                        print('subkey size =', (len(primary_keyp)+len(primary_keyq))*8, 'bits')
-                else:
-                    print('rootkey value:')
-                    primary_key = self._long_to_bytes(rootkey._key.keymaterial.s)
-                    print("".join(["%02x" % c for c in primary_key]))
-                    print('subkey values:')
-                    for subkey, value in rootkey._children.items():
-                        print('subkey id', subkey)
-                        sub_key = self._long_to_bytes(value._key.keymaterial.s)
-                        print('subkey value')
-                        print("".join(["%02x" % c for c in sub_key]))
-
-        except:
-            print('Unlocking failed')
-
-        # rootkey is no longer unlocked
-        assert rootkey.is_unlocked is False
+        from . import pgp_bridge
+        parsed = pgp_bridge.parse_armored(rootkey_ascii_armor, rootkey_passphrase)
+        print('key type:', parsed.get('type'))
+        if parsed.get('type') == 'pqc-composite':
+            print('composite PQC blob (160B):', parsed['blob'])
+            return
+        for k in parsed.get('keys', []):
+            if k.get('kind') == 'rsa':
+                print(k['name'], 'RSA  p||q =', k['p'] + k['q'])
+            else:
+                print(k['name'], 'ECC  s =', k['s'], ' curve =', k.get('curve'))
 
     def encrypt(self, slot):
         print('Unavailable command')

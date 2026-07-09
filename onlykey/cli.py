@@ -444,6 +444,27 @@ def cli():
                 print(sys.exc_info()[0])
                 print('setpqc [RSA1-RSA4] [160-byte hex blob | file]')
                 return
+        elif sys.argv[1] == 'loadpqc':
+            # Parse a composite PQC PGP private key FILE (via the OpenPGP.js bridge)
+            # and load its 160-byte seed blob into an RSA slot. Needs Node.js.
+            # loadpqc <keyfile.asc> [RSA1-RSA4] [passphrase]
+            try:
+                from . import pqc, pgp_bridge
+                keyfile = sys.argv[2]
+                slotmap = {'RSA1': 1, 'RSA2': 2, 'RSA3': 3, 'RSA4': 4}
+                slot_id = slotmap.get(sys.argv[3]) if len(sys.argv) > 3 else 1
+                if not slot_id:
+                    print('loadpqc <keyfile> [RSA1-RSA4] [passphrase]')
+                    return
+                passphrase = sys.argv[4] if len(sys.argv) > 4 else None
+                blob = pgp_bridge.composite_blob(path=keyfile, passphrase=passphrase)
+                pqc.load_composite_key(only_key, slot_id, blob)
+                print('Loaded composite PQC PGP key from %s (%d bytes) into RSA%d'
+                      % (keyfile, len(blob), slot_id))
+            except Exception:
+                print(sys.exc_info()[1])
+                print('loadpqc <keyfile> [RSA1-RSA4] [passphrase]')
+                return
         elif sys.argv[1] == 'wipekey':
             try:
                 if sys.argv[2] == 'RSA1':

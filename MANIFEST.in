@@ -1,1 +1,2 @@
 include README.md
+recursive-include onlykey/openpgp_bridge *.js

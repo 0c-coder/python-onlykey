@@ -19,6 +19,8 @@ setup(
     author_email='admin@crp.to',
     license='MIT',
     packages=find_packages(exclude=['contrib', 'docs', 'tests']),
+    package_data={'onlykey': ['openpgp_bridge/*.js']},
+    include_package_data=True,
     entry_points = {
         'console_scripts': [
             'onlykey-cli=onlykey.cli:main',
