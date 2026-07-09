@@ -8,6 +8,7 @@ Slots:
   134 (RESERVED_KEY_XWING)  - X-Wing hybrid KEM
 """
 
+import hashlib
 import sys
 import time
 
@@ -15,7 +16,8 @@ from onlykey.client import OnlyKey, Message
 from . import (
     OKGETPUBKEY, OKDECRYPT, OKSETPRIV, GENERATE_ON_DEVICE,
     DEFAULT_MLKEM_SLOT, DEFAULT_XWING_SLOT,
-    KEYTYPE_MLKEM768, KEYTYPE_XWING, validate_ecc_slot,
+    KEYTYPE_MLKEM768, KEYTYPE_XWING, RESERVED_KEY_WEB_DERIVATION,
+    validate_ecc_slot,
 )
 
 # Sizes
@@ -24,6 +26,18 @@ XWING_CT_SIZE = 1120
 XWING_SS_SIZE = 32
 MLKEM_PK_SIZE = 1184
 MLKEM_CT_SIZE = 1088
+DERIVED_RESP_SIZE = 64   # [pk_X|mlkem_seed] or [ss_X|mlkem_seed]
+
+
+def derived_label_tag(label):
+    """32-byte derivation tag for a derived-identity label.
+
+    This is the value the firmware folds into HKDF as ``additional_data`` and
+    MUST be produced identically by the web app for the same logical identity,
+    otherwise the two derive different keys and files won't cross-decrypt.
+    Convention: SHA256(utf8(label)).
+    """
+    return hashlib.sha256(label.encode("utf-8")).digest()
 
 
 class OnlyKeyPQ:
@@ -149,6 +163,53 @@ class OnlyKeyPQ:
         if len(ss) != XWING_SS_SIZE:
             raise RuntimeError(f"X-Wing decaps: got {len(ss)} bytes, expected {XWING_SS_SIZE}")
         return ss
+
+    # ---- Derived (label-based) X-Wing split custody ----------------------
+    # No key is stored; the device derives sk_X + an ML-KEM seed from
+    # (web-derivation key, tag, RPID="onlyagent.app"). sk_X stays on device;
+    # the host does the ML-KEM half (derived_xwing.py). This is the path that
+    # interoperates with the web app: same OnlyKey + same tag => same key.
+
+    def derive_recipient(self, label):
+        """Derived X-Wing recipient over HID. Returns (pk_X(32), mlkem_seed(32)).
+
+        Single-report request: the 32-byte tag fits one report. Caller builds
+        the 1216-byte age recipient with derived_xwing.build_recipient().
+        """
+        tag = derived_label_tag(label)
+        resp = self._send_and_receive(
+            OKGETPUBKEY, RESERVED_KEY_WEB_DERIVATION, payload=tag,
+            key_type=KEYTYPE_XWING, expected_size=DERIVED_RESP_SIZE,
+            timeout_ms=10000,
+        )
+        if len(resp) != DERIVED_RESP_SIZE:
+            raise RuntimeError(
+                f"derived recipient: got {len(resp)} bytes, expected {DERIVED_RESP_SIZE}"
+            )
+        return resp[:32], resp[32:64]
+
+    def derive_decaps(self, label, ct_x):
+        """Derived X-Wing decaps over HID. Returns (ss_X(32), mlkem_seed(32)).
+
+        Sends [tag(32) || ct_X(32)] = 64 B. That exceeds one 57-byte report, so
+        it is streamed with the multi-packet path; the firmware input framing is
+        still being validated on hardware (see okcrypto_xwing_web_derive). The
+        host then finishes the ML-KEM half with derived_xwing.split_decapsulate().
+        """
+        if len(ct_x) != 32:
+            raise ValueError(f"ct_X must be 32 bytes, got {len(ct_x)}")
+        tag = derived_label_tag(label)
+        print("Press OnlyKey button if prompted...", file=sys.stderr)
+        self.ok.send_large_message2(
+            msg=Message(OKDECRYPT), payload=list(tag + bytes(ct_x)),
+            slot_id=RESERVED_KEY_WEB_DERIVATION,
+        )
+        resp = self._read_response(expected_size=DERIVED_RESP_SIZE, timeout_ms=30000)
+        if len(resp) != DERIVED_RESP_SIZE:
+            raise RuntimeError(
+                f"derived decaps: got {len(resp)} bytes, expected {DERIVED_RESP_SIZE}"
+            )
+        return resp[:32], resp[32:64]
 
     def mlkem_keygen(self, slot=DEFAULT_MLKEM_SLOT):
         """Generate an ML-KEM-768 keypair in the given ECC slot. Returns 1184-byte pubkey."""

@@ -51,6 +51,12 @@ def validate_ecc_slot(slot):
 KEYTYPE_MLKEM768 = 5
 KEYTYPE_XWING = 6
 
+# Reserved web-derivation key slot (okcore.h RESERVED_KEY_WEB_DERIVATION). Used
+# for DERIVED (label-based) X-Wing: the device derives sk_X + an ML-KEM seed from
+# (web-derivation key, 32-byte label tag, RPID="onlyagent.app") and never stores
+# a key. This is the split-custody path that interoperates with the web app.
+RESERVED_KEY_WEB_DERIVATION = 128
+
 # An all-0xFF key body sent with OKSETPRIV tells the firmware to generate the
 # key on-device (gen_key trigger in okcore.cpp).
 GENERATE_ON_DEVICE = b"\xff" * 8

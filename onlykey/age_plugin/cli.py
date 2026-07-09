@@ -220,6 +220,43 @@ def cmd_identity(slot: int = DEFAULT_XWING_SLOT):
     print(identity)
 
 
+def cmd_generate_derived(label: str):
+    """Derive a label-based X-Wing key on OnlyKey; print recipient + identity.
+
+    Nothing is stored on the device — the key is reproduced on demand from
+    (web-derivation key, label, RPID="onlyagent.app"), so the SAME OnlyKey and
+    label produce the same key in the web app (interoperable age files)."""
+    from onlykey.age_plugin.onlykey_hid import OnlyKeyPQ
+    from onlykey.age_plugin import derived_xwing as dx
+
+    print(f"Deriving X-Wing key on OnlyKey (label {label!r})...", file=sys.stderr)
+    dev = OnlyKeyPQ()
+    pk_x, seed = dev.derive_recipient(label)
+    recipient = encode_recipient(dx.build_recipient(pk_x, seed))
+    print(f"# Recipient: {recipient}", file=sys.stderr)
+    print(f"# created: {__import__('datetime').datetime.now().isoformat()}")
+    print(f"# recipient: {recipient}")
+    print(dx.encode_identity(label))
+
+
+def cmd_recipient_derived(label: str):
+    """Print the derived X-Wing recipient for a label."""
+    from onlykey.age_plugin.onlykey_hid import OnlyKeyPQ
+    from onlykey.age_plugin import derived_xwing as dx
+
+    dev = OnlyKeyPQ()
+    pk_x, seed = dev.derive_recipient(label)
+    print(encode_recipient(dx.build_recipient(pk_x, seed)))
+
+
+def cmd_identity_derived(label: str):
+    """Print a derived (label-based) identity for use with age -i."""
+    from onlykey.age_plugin import derived_xwing as dx
+
+    print(f"# age-plugin-onlykey derived identity (label {label!r})")
+    print(dx.encode_identity(label))
+
+
 def _parse_onlykey_identities(identities):
     parsed = []
     for identity in identities:
@@ -230,18 +267,78 @@ def _parse_onlykey_identities(identities):
     return parsed
 
 
+def _decode_xwing_stanza(stanza):
+    """Return the validated 1120-byte X-Wing ciphertext from a stanza, or None
+    if it is not an mlkem768x25519 stanza. Raises ValueError on a malformed one."""
+    if stanza.tag != "mlkem768x25519":
+        return None
+    if len(stanza.args) != 1:
+        raise ValueError(
+            f"Malformed mlkem768x25519 stanza: expected 1 arg, got {len(stanza.args)}"
+        )
+    try:
+        enc = b64decode_no_pad(stanza.args[0])
+    except Exception as exc:
+        raise ValueError(
+            "Malformed mlkem768x25519 stanza: invalid base64 ciphertext"
+        ) from exc
+    if len(enc) != XWING_STANZA_ENC_LEN:
+        raise ValueError(
+            f"Malformed mlkem768x25519 stanza: ciphertext must be {XWING_STANZA_ENC_LEN} bytes, got {len(enc)}"
+        )
+    if len(stanza.body) != FILE_KEY_LEN:
+        raise ValueError(
+            f"Malformed mlkem768x25519 stanza body: expected {FILE_KEY_LEN} bytes, got {len(stanza.body)}"
+        )
+    return enc
+
+
 def unwrap_callback(identities, stanzas_per_file):
-    """Plugin identity-v1 callback: unwrap file keys using OnlyKey."""
+    """Plugin identity-v1 callback: unwrap file keys using OnlyKey.
+
+    Supports BOTH identity models: slot-based (a key stored in an ECC slot) and
+    derived (label-based split custody, interoperable with the web app).
+    """
     from onlykey.age_plugin.onlykey_hid import OnlyKeyPQ
     from onlykey.age_plugin.xwing import open_file_key
+    from onlykey.age_plugin import derived_xwing as dx
 
     results = []
     parsed_identities = _parse_onlykey_identities(identities)
-    if not parsed_identities:
+    derived_labels = [d["label"] for d in (dx.decode_identity(s) for s in identities) if d]
+    if not parsed_identities and not derived_labels:
         print("No valid OnlyKey identity supplied.", file=sys.stderr)
         return results
 
     dev = OnlyKeyPQ()
+
+    # ---- Derived (label-based) identities: split-custody X-Wing ----------
+    # The device returns its X25519 half + ML-KEM seed; the host finishes the
+    # ML-KEM half. Same OnlyKey + same label => the same key as the web app.
+    for label in derived_labels:
+        try:
+            pk_x, mlkem_seed = dev.derive_recipient(label)
+        except Exception as exc:
+            print(f"Could not derive X-Wing key for label {label!r}: {exc}", file=sys.stderr)
+            continue
+        for file_idx, stanzas in stanzas_per_file.items():
+            for stanza in stanzas:
+                enc = _decode_xwing_stanza(stanza)
+                if enc is None:
+                    continue
+                ct_x = enc[XWING_STANZA_ENC_LEN - 32:XWING_STANZA_ENC_LEN]
+                try:
+                    ss_x, _seed = dev.derive_decaps(label, ct_x)
+                    ss = dx.split_decapsulate(ss_x, enc, pk_x, mlkem_seed)
+                    file_key = open_file_key(ss, enc, stanza.body)
+                    results.append((file_idx, file_key))
+                    break
+                except Exception as e:
+                    print(f"derived unwrap failed: {e}", file=sys.stderr)
+                    continue
+
+    if not parsed_identities:
+        return results
 
     # The identity carries the ECC slot the key lives in; any of the 32 ECC
     # slots (101-132) is valid. Query that slot's public key and match it.
@@ -369,6 +466,31 @@ def main():
             else:
                 print(f"Unknown state machine: {state_machine}", file=sys.stderr)
                 sys.exit(1)
+
+    # Derived (label-based) mode: --derived --label NAME. No slot; the key is
+    # reproduced on demand and interoperates with the web app.
+    derived = "--derived" in args
+    label = None
+    for i, arg in enumerate(args):
+        if arg == "--label" and i + 1 < len(args):
+            label = args[i + 1]
+        elif arg.startswith("--label="):
+            label = arg.split("=", 1)[1]
+    if derived:
+        if not label:
+            print("Error: --derived requires --label <name>", file=sys.stderr)
+            sys.exit(1)
+        if "--generate" in args or "-g" in args:
+            cmd_generate_derived(label)
+        elif "--recipient" in args or "-r" in args:
+            cmd_recipient_derived(label)
+        elif "--identity" in args or "-i" in args:
+            cmd_identity_derived(label)
+        elif "--version" in args or "-v" in args:
+            print(f"age-plugin-onlykey {__version__}")
+        else:
+            print(__doc__)
+        return
 
     # Optional --slot N / --slot=N selects which ECC slot (101-132) holds the key.
     slot = DEFAULT_XWING_SLOT
