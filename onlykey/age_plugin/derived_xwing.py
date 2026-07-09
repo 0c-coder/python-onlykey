@@ -15,6 +15,7 @@ keytype X-Wing), matching the FIDO2 branch:
   DERIVE_SHAREDSEC  -> [ ss_X(32) | mlkem_seed(32) ]
 """
 
+import base64
 import hashlib
 
 from kyber_py.ml_kem import ML_KEM_768
@@ -74,3 +75,30 @@ def split_decapsulate(ss_x, ciphertext, pk_x, mlkem_seed):
 def ct_x_of(ciphertext):
     """Return ct_X (the 32 bytes the device needs) from a stanza ciphertext."""
     return bytes(ciphertext[MLKEM_CT:XWING_CT])
+
+
+# ---- derived age identity encoding (label-based, no slot) ----------------
+# Distinguishes a derived identity from a slot identity so age-plugin-onlykey
+# can support BOTH models (like SSH/GPG). A derived identity carries the label;
+# the key is reproduced on demand from (OnlyKey web-derivation key, label, RPID).
+_DERIVED_PREFIX = "AGE-PLUGIN-ONLYKEY-DERIVED-"
+
+
+def encode_identity(label):
+    """Encode a derived identity string for a label (used with `age -i`)."""
+    if not isinstance(label, str) or not label:
+        raise ValueError("derived identity needs a non-empty label")
+    b32 = base64.b32encode(label.encode("utf-8")).decode("ascii").rstrip("=")
+    return _DERIVED_PREFIX + b32.upper()
+
+
+def decode_identity(s):
+    """Decode a derived identity string -> {'derived': True, 'label': str},
+    or None if `s` is not a derived identity (caller falls back to slot decode)."""
+    s = str(s).strip().upper()
+    if not s.startswith(_DERIVED_PREFIX):
+        return None
+    b32 = s[len(_DERIVED_PREFIX):]
+    b32 += "=" * (-len(b32) % 8)
+    label = base64.b32decode(b32).decode("utf-8")
+    return {"derived": True, "label": label}

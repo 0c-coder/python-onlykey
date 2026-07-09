@@ -63,3 +63,12 @@ def test_wrong_device_share_fails():
 def test_deterministic_recipient_per_seed():
     _, pk_x, seed = _device_derive()
     assert dx.build_recipient(pk_x, seed) == dx.build_recipient(pk_x, seed)
+
+
+def test_derived_identity_roundtrip():
+    for label in ("age:personal", "alice@example.com", "work"):
+        ident = dx.encode_identity(label)
+        assert ident.startswith("AGE-PLUGIN-ONLYKEY-DERIVED-")
+        assert dx.decode_identity(ident) == {"derived": True, "label": label}
+    # a slot-style identity is not a derived identity
+    assert dx.decode_identity("AGE-PLUGIN-ONLYKEY-1QQQ") is None
