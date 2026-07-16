@@ -1,0 +1,22 @@
+[Unit]
+Description=OnlyAgent data-partition unlock (OnlyKey FDE over I2C)
+DefaultDependencies=no
+After=local-fs-pre.target systemd-udev-settle.service
+Before=onlyagentd.service
+Wants=systemd-udev-settle.service
+ConditionPathExists=!/dev/mapper/okdata
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/onlyagent-unlock
+# KEK material lives only in pipes/tmpfs; no swap on the appliance.
+Environment=OKFDE_DEV=/dev/mmcblk0p3
+Environment=OKFDE_NAME=okdata
+Environment=OKFDE_MOUNT=/data
+Environment=OKFDE_BUS=1
+Environment=OKFDE_ADDR=0x2c
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

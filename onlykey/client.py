@@ -245,7 +245,11 @@ class Slotduo(object):
         return 'Slot {}: {}'.format(self.name, self.label or '<empty>')
 
 class OnlyKey(object):
-    def __init__(self, connect=True):
+    def __init__(self, connect=True, transport='hid', i2c_bus=1, i2c_addr=0x2C):
+        # transport: 'hid' (default, USB) or 'i2c' (on-board LicheeRV/NanoKVM).
+        self.transport = transport
+        self.i2c_bus = i2c_bus
+        self.i2c_addr = i2c_addr
 
         if connect:
             tries = 5
@@ -263,6 +267,11 @@ class OnlyKey(object):
             raise e
 
     def _connect(self):
+        if self.transport == 'i2c':
+            from .i2ctransport import I2CDevice
+            self._hid = I2CDevice(bus=self.i2c_bus, addr=self.i2c_addr)
+            self.path = '/dev/i2c-%d' % self.i2c_bus
+            return
         try:
             for d in hid.enumerate(0, 0):
                 vendor_id = d['vendor_id']

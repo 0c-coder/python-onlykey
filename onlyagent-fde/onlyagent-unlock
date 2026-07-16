@@ -1,0 +1,77 @@
+#!/bin/sh
+# onlyagent-unlock — boot-time LUKS unlock for the OnlyAgent data partition.
+# First boot provisions LUKS2 (keyslot 0 = OnlyKey KEK, keyslot 1 = recovery
+# passphrase). Every later boot opens it. KEK travels only through a pipe.
+#
+# Depends: cryptsetup, i2c-tools (optional, for presence check), python3 +
+# python-onlykey (I2C transport), okfde-client on PATH.
+set -eu
+
+DEV="${OKFDE_DEV:-/dev/mmcblk0p3}"    # data partition
+NAME="${OKFDE_NAME:-okdata}"
+MOUNT="${OKFDE_MOUNT:-/data}"
+BUS="${OKFDE_BUS:-1}"
+ADDR="${OKFDE_ADDR:-0x2c}"
+RECOVERY_STASH="/run/onlyagent/recovery.txt"   # tmpfs; one-time display in web app
+
+log() { echo "onlyagent-unlock: $*" >&2; }
+
+led_slow_blink() { [ -x /usr/sbin/okled ] && okled slow-blink || true; }
+led_ok()         { [ -x /usr/sbin/okled ] && okled solid     || true; }
+led_error()      { [ -x /usr/sbin/okled ] && okled error     || true; }
+
+if [ -e "/dev/mapper/${NAME}" ]; then
+    log "already unlocked"
+    exit 0
+fi
+
+led_slow_blink
+log "waiting for OnlyKey PIN entry on the keypad..."
+
+# Derive the KEK. --wait-pin polls until the user unlocks the key (up to 2 min).
+# okfde-client prints 32 raw bytes to stdout; capture without touching disk.
+if ! KEKHEX="$(okfde-client --bus "$BUS" --addr "$ADDR" --wait-pin --hex)"; then
+    led_error
+    log "KEK derivation failed"
+    exit 1
+fi
+[ -n "$KEKHEX" ] || { led_error; log "empty KEK"; exit 1; }
+
+# Helper: feed the raw KEK to a cryptsetup command via stdin pipe.
+kek_pipe() { printf '%s' "$KEKHEX" | xxd -r -p; }
+
+if ! cryptsetup isLuks "$DEV" 2>/dev/null; then
+    # ---- first use: provision ----
+    log "no LUKS header on $DEV — provisioning (first boot)"
+    kek_pipe | cryptsetup luksFormat --type luks2 --key-file=- "$DEV"
+
+    # Recovery passphrase in keyslot 1. Shown once in the web app.
+    RECOVERY="$( (command -v diceware >/dev/null 2>&1 && diceware -n 8) || \
+                 (head -c 24 /dev/urandom | base64) )"
+
+    # Add recovery keyslot: KEK (keyslot 0) authorizes via stdin; the new
+    # passphrase is passed as a temp key-file on tmpfs, then shredded.
+    mkdir -p /run/onlyagent
+    umask 077
+    NEWKEY=/run/onlyagent/newkey
+    printf '%s' "$RECOVERY" > "$NEWKEY"
+    kek_pipe | cryptsetup luksAddKey --key-file=- "$DEV" "$NEWKEY"
+    shred -u "$NEWKEY" 2>/dev/null || rm -f "$NEWKEY"
+
+    printf '%s\n' "$RECOVERY" > "$RECOVERY_STASH"   # tmpfs; onlyagentd wipes after ack
+
+    kek_pipe | cryptsetup open --key-file=- "$DEV" "$NAME"
+    mkfs.ext4 -q "/dev/mapper/${NAME}"
+    log "provisioned; recovery passphrase staged for one-time display"
+else
+    # ---- every later boot ----
+    kek_pipe | cryptsetup open --key-file=- "$DEV" "$NAME"
+    log "unlocked"
+fi
+
+unset KEKHEX RECOVERY 2>/dev/null || true
+
+mkdir -p "$MOUNT"
+mount "/dev/mapper/${NAME}" "$MOUNT"
+led_ok
+log "mounted at $MOUNT"
