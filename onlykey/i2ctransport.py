@@ -17,7 +17,7 @@ import fcntl
 from .i2csession import (
     Session, TransitError, derive_transit_key,
     FRAME_LEN, ENC_FRAME_LEN, REPORT_LEN,
-    SOF_RSP, SOF_RSP_ENC, CMD_SESSION, CMD_SESSEND,
+    SOF_RSP, SOF_RSP_ENC, CMD_SESSEND,
 )
 
 I2C_SLAVE = 0x0703          # <linux/i2c-dev.h> set slave address ioctl
@@ -90,9 +90,9 @@ class I2CDevice(object):
     def set_transit_key(self, shared_secret):
         """Arm the single-use transit key from the X-Wing shared secret the host
         obtained by encapsulating to the device's derived transit key. The caller
-        must already have sent the matching ciphertext with OKIC2_CMD_SESSION so
-        the device derived the same ss on-device. Consumed by the next encrypted
-        response."""
+        must already have sent the matching ciphertext as an OKDECRYPT to the
+        transit slot, so the device derived the same ss on-device. Consumed by the
+        next encrypted response."""
         self.session.transit_key = derive_transit_key(shared_secret)
 
     def end_session(self):

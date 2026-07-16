@@ -37,7 +37,6 @@ import argparse
 import struct
 
 from onlykey import OnlyKey, Message
-from onlykey.i2csession import CMD_SESSION
 
 FDE_INFO = b"onlyagent-fde-v1"
 KEK_LEN = 32
@@ -45,24 +44,24 @@ XWING_CT = 1120
 XWING_PK = 1216
 BLOB_MAGIC = b"OAFDE2"
 
-# Derivation labels. These are IDENTIFIERS, not key derivation: SHA256(utf8(label))
-# is just the codebase's convention for encoding a label string into the 32 bytes
-# the device expects (same as onlykey/age_plugin/derived_xwing.py and the CLI).
-# The label is public and carries no secret.
+# The SLOT selects the purpose — and therefore the derivation label, which is a
+# FIRMWARE CONSTANT. No label bytes are sent: buffer[6] is the packet length/0xFF
+# flag on the multi-packet path the 1120-byte ct requires, so it cannot carry a
+# keytype, and LARGE_BUFFER_SIZE (1120) is exactly one ct, so label||ct would not
+# fit either. Using the slot also means a compromised host cannot ask the device to
+# derive under a label of its choosing. See INTEGRATION-i2c.md §5.
 #
-# The actual KDF is on-device: okcrypto_derive_key(KEYTYPE_XWING, [flag|label],
-# RESERVED_KEY_WEB_DERIVATION) runs RFC 5869 HKDF (okcrypto_hkdf) —
-#   PRK  = HMAC-SHA256(salt=[flag|label32], ikm=web-derivation key)
+# The firmware labels are SHA256(utf8(s)) for these exact strings — keep in sync
+# with okcrypto_xwing_slot_label():
+#     slot 127 -> "fde:onlyagent"
+#     slot 126 -> "fde-transit:onlyagent"
+# The KDF itself is on-device RFC 5869 HKDF (okcrypto_hkdf via okcrypto_derive_key):
+#   PRK  = HMAC-SHA256(salt=[2|label32], ikm=web-derivation key)
 #   seed = HMAC-SHA256(PRK, SHA256("onlyagent.app") || 0x01)
-# and that HKDF output IS the X-Wing seed (no second hash). The firmware sets
-# flag=2 to domain-separate from the age plugin's sk_X. See INTEGRATION-i2c.md §5.
-LABEL_KEK = hashlib.sha256(b"fde:onlyagent").digest()
-LABEL_TRANSIT = hashlib.sha256(b"fde-transit:onlyagent").digest()
-
-RESERVED_KEY_WEB_DERIVATION = 128
-KEYTYPE_XWING = 6
-# bit7 = "derived, full on-device X-Wing" (no seed release); see INTEGRATION-i2c.md §5
-KEYTYPE_XWING_DERIVED = KEYTYPE_XWING | 0x80      # 0x86
+# and that HKDF output IS the X-Wing seed (no second hash). Salt flag 2 separates it
+# from the age plugin's sk_X (0/1) and mlkem_seed (3).
+SLOT_FDE_KEK = 127
+SLOT_FDE_TRANSIT = 126
 
 
 def hkdf_sha256(ikm, info, length=KEK_LEN, salt=b"\x00" * 32):
@@ -113,51 +112,46 @@ def read_blob(path):
 
 
 # ── device I/O ─────────────────────────────────────────────────────────────
-def send_derived_ct(ok, label32, ct, session_setup=False):
-    """Send a 1120-byte X-Wing ct for on-device decapsulation against the key
-    derived from `label32`.
+def send_ct(ok, slot, ct):
+    """Send a 1120-byte X-Wing ct for on-device decapsulation against the key the
+    firmware derives for `slot`.
 
     Uses the existing multi-packet reassembly (send_large_message2 -> large_buffer),
     which okcrypto_xwing_decaps() already reads from — each chunk is just another
-    64-byte report, so the I2C transport needs no special handling.
+    64-byte report, so the I2C transport needs no special handling. The payload is
+    the bare ct: the slot travels in the report header (buffer[5]) and is preserved
+    across packets by process_packets().
 
-    LARGE_BUFFER_SIZE is 1120 (exactly one ct), which is why the transit ct and
-    the KEK ct must be separate messages.
+    LARGE_BUFFER_SIZE is 1120 (exactly one ct), which is why the transit ct and the
+    KEK ct must be separate messages.
     """
-    payload = [RESERVED_KEY_WEB_DERIVATION, KEYTYPE_XWING_DERIVED] + list(label32) + list(ct)
-    if session_setup:
-        # report[4] = OKIC2_CMD_SESSION so okic2_poll() sets okic2_session_target
-        # and the decaps branch retains ss as the transit key instead of sending it.
-        ok.send_large_message2(payload=[CMD_SESSION] + payload,
-                               msg=Message.OKDECRYPT,
-                               slot_id=RESERVED_KEY_WEB_DERIVATION)
-    else:
-        ok.send_large_message2(payload=payload, msg=Message.OKDECRYPT,
-                               slot_id=RESERVED_KEY_WEB_DERIVATION)
+    ok.send_large_message2(payload=list(ct), msg=Message.OKDECRYPT, slot_id=slot)
 
 
 def arm_transit_key(ok, dev, pk):
-    """Encapsulate to the derived transit key, send the ct, device retains ss.
-    The key is single-use: the next encrypted response consumes it."""
+    """Encapsulate to the derived transit key, send the ct to the transit slot; the
+    firmware retains ss instead of returning it (that slot never emits a shared
+    secret). The key is single-use: the next encrypted response consumes it.
+    No touch — nothing leaves the device on this path."""
     from onlykey.age_plugin import xwing
     ss, ct = xwing.xwing_encaps_host(pk)          # -> (ss, ct)
-    send_derived_ct(ok, LABEL_TRANSIT, ct, session_setup=True)
+    send_ct(ok, SLOT_FDE_TRANSIT, ct)
     ack = ok.read_bytes(2, to_bytes=True, timeout_ms=15000)
     if not ack:
         raise RuntimeError("no transit-key ack from device")
     dev.set_transit_key(ss)                        # transit_key = SHA256(ss)
 
 
-def read_derived_pubkey(ok, label32):
-    """Fetch the 1216-byte derived X-Wing public key (public; plaintext is fine).
+def read_derived_pubkey(ok, slot):
+    """Fetch the 1216-byte derived X-Wing public key for `slot` (public; plaintext
+    is fine).
 
     >64 bytes, so this needs the multi-frame response path. okic2 v1 queues one
     frame at a time — provision over USB, or add the ring buffer noted in
-    INTEGRATION-i2c.md. Per-boot unlock does not hit this path (pk is cached in
-    the blob).
+    INTEGRATION-i2c.md. Per-boot unlock does not hit this path (pk_transit is cached
+    in the blob).
     """
-    ok.send_message(msg=Message.OKGETPUBKEY,
-                    payload=[RESERVED_KEY_WEB_DERIVATION, KEYTYPE_XWING_DERIVED] + list(label32))
+    ok.send_message(msg=Message.OKGETPUBKEY, payload=[slot])
     out = bytearray()
     while len(out) < XWING_PK:
         chunk = ok.read_bytes(64, to_bytes=True, timeout_ms=10000)
@@ -172,7 +166,7 @@ def read_derived_pubkey(ok, label32):
 def decapsulate_kek(ok, ct):
     """Send the stored ct; the device decapsulates on-device and returns ss,
     encrypted under the armed single-use transit key. Requires a touch."""
-    send_derived_ct(ok, LABEL_KEK, ct, session_setup=False)
+    send_ct(ok, SLOT_FDE_KEK, ct)
     ss = ok.read_bytes(32, to_bytes=True, timeout_ms=30000)
     if not ss or len(ss) < 32:
         raise RuntimeError("short/empty decapsulation response")
@@ -223,8 +217,8 @@ def main():
             # Both 1216-byte reads happen here only. Run provisioning over USB
             # (or add the okic2 ring buffer) — see INTEGRATION-i2c.md.
             from onlykey.age_plugin import xwing
-            pk_kek = read_derived_pubkey(ok, LABEL_KEK)
-            pk_transit = read_derived_pubkey(ok, LABEL_TRANSIT)
+            pk_kek = read_derived_pubkey(ok, SLOT_FDE_KEK)
+            pk_transit = read_derived_pubkey(ok, SLOT_FDE_TRANSIT)
             ss, ct = xwing.xwing_encaps_host(pk_kek)   # -> (ss, ct); ct is fixed
             write_blob(args.blob, ct, pk_transit)
             sys.stderr.write("okfde: provisioned blob at %s\n" % args.blob)

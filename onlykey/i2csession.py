@@ -29,9 +29,10 @@ FRAME_LEN = 69
 ENC_FRAME_LEN = 85
 TAG_LEN = 16
 
-# Session control opcodes (report[4]); see okic2.h
-CMD_SESSION = 0xE0
-CMD_SESSEND = 0xE1
+# Transit-key setup has no opcode: report[4] is the OnlyKey message byte that the
+# firmware's recvmsg() switches on, so it cannot be repurposed. Setup is an OKDECRYPT
+# to the transit SLOT, which the firmware recognises. Only teardown is okic2-local.
+CMD_SESSEND = 0xE1   # zeroize the transit key
 
 FIXED_IV = b"\x00" * 12      # safe: the key is single-use (see module docstring)
 
