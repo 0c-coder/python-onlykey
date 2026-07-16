@@ -52,8 +52,23 @@ class I2CDevice(object):
     def open_path(self, path):
         return None      # already opened in __init__
 
-    def write(self, raw_bytes):
-        """Send a 64-byte OnlyKey report (always plaintext)."""
+    def write(self, raw_bytes, timeout_ms=5000):
+        """Send a 64-byte OnlyKey report (always plaintext).
+
+        Waits for the device to have consumed the previous frame first. This is
+        REQUIRED, not an optimisation: okic2's Wire ISR drops an incoming frame
+        while one is still staged (rx_complete), and okic2_poll() only drains one
+        frame per pass of the ~50 ms sketch loop. send_large_message2() pushes ~20
+        back-to-back reports for a 1120-byte X-Wing ct, so without this the tail of
+        every multi-packet message would be silently lost.
+        """
+        deadline = time.time() + (timeout_ms / 1000.0)
+        while time.time() < deadline:
+            if self._read_status() != ST_BUSY:
+                break
+            time.sleep(0.005)
+        else:
+            raise I2CTransportError("device stayed BUSY; previous frame not consumed")
         self._seq = (self._seq + 1) & 0xFF
         self._fd.write(self.session.build_command(self._seq, bytearray(raw_bytes)))
         return REPORT_LEN
