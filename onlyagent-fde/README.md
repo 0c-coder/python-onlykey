@@ -9,7 +9,7 @@ material touches disk.
 - `okfde-client` — derives the 32-byte KEK from the OnlyKey over I2C. The KEK is an **X-Wing**
   (X25519 + ML-KEM-768) shared secret, HKDF-stretched. `--provision` writes the blob; default
   mode unlocks. Prints the raw KEK to stdout for `cryptsetup --key-file=-`.
-- `onlyagent-unlock` — boot script: first-boot LUKS provisioning (KEK + recovery keyslot),
+- `onlyagent-unlock` — boot script: first-boot LUKS provisioning (single KEK keyslot),
   every-boot open + mount.
 - `onlyagent-unlock.service` — systemd unit, ordered before `onlyagentd.service`.
 - `test_framing.py` — transport/transit tests (CRC agreement with the C firmware, single-use key
@@ -79,7 +79,7 @@ systemctl enable onlyagent-unlock.service
 ```
 
 Requirements on the image: `cryptsetup` (LUKS2), `python3`, `python-onlykey` (I2C transport),
-`xxd`, `shred`. `diceware` optional (falls back to urandom base64 for the recovery phrase).
+`xxd`. (No `diceware`/`shred` — there is no recovery passphrase; see Recovery above.)
 
 ## Configuration (env / unit)
 
@@ -96,15 +96,26 @@ Requirements on the image: `cryptsetup` (LUKS2), `python3`, `python-onlykey` (I2
 1. Unit runs before onlyagentd; skips if `/dev/mapper/okdata` already exists.
 2. LED slow-blink → user enters PIN on the OnlyKey keypad (KVM already functional).
 3. `okfde-client --wait-pin` polls until unlocked, derives the KEK.
-4. First boot: `luksFormat` (keyslot 0 = KEK), add recovery passphrase (keyslot 1), `mkfs`,
-   stash the passphrase in `/run/onlyagent/recovery.txt` (tmpfs) for one-time web-app display.
+4. First boot: `luksFormat` with a single keyslot (the KEK), `mkfs`.
 5. Later boots: `cryptsetup open`, mount `/data`, LED solid, onlyagentd starts.
 
-## Recovery
+## Recovery — restore your OnlyKey backup
 
-Keyslot 1 holds a recovery passphrase shown exactly once in the web app (require an explicit
-"I stored it" acknowledgment, then wipe `/run/onlyagent/recovery.txt`). Lost OnlyKey + no backup
-+ no passphrase = data unrecoverable, by design.
+There is **one LUKS keyslot**: the OnlyKey KEK. Recovery is restoring an OnlyKey backup onto a
+replacement device.
+
+That works because the KEK is derived from the web-derivation key (slot 128), and the OnlyKey
+backup includes it — `BACKUP` in `okcore.cpp` loops slots 101..132. A restored OnlyKey therefore
+re-derives the same X-Wing seed, decapsulates the same stored `ct`, and reproduces the same KEK.
+The blob on the boot partition is public and needs no protection.
+
+**There is deliberately no recovery-passphrase keyslot.** It would be a second, weaker path to the
+data — a paper passphrase versus a hardware-gated key — and would break the property the product
+exists to provide: the disk cannot be opened without the OnlyKey. Keep backups of the OnlyKey
+instead; that is the recovery story, and it is the same one users already have for their other
+OnlyKey credentials.
+
+Lost OnlyKey + no backup = data unrecoverable, by design.
 
 ## Requirements
 
