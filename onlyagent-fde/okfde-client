@@ -173,18 +173,21 @@ def decapsulate_kek(ok, ct):
     return bytes(ss[:32])
 
 
-def wait_for_unlock(ok, timeout=120):
-    """Poll until the OnlyKey reports PIN-unlocked."""
+def wait_for_unlock(dev, timeout=120):
+    """Poll the I2C status byte until the OnlyKey is PIN-unlocked.
+
+    Must read STATUS, not a response: while locked the firmware drops command
+    frames without parsing them and sends nothing back, so there is no "device
+    locked" string to catch — only the status byte reports it. ST_IDLE means
+    "PIN entered, no command pending"; anything else (LOCKED, BUSY, or a read
+    error) means keep waiting.
+    """
+    from onlykey.i2ctransport import ST_IDLE
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            ok.read_string(timeout_ms=500)
+        if dev.status() == ST_IDLE:
             return True
-        except RuntimeError as e:
-            if "locked" in str(e).lower() or "PIN" in str(e):
-                time.sleep(1.0)
-                continue
-            raise
+        time.sleep(0.5)
     return False
 
 
@@ -208,7 +211,7 @@ def main():
         return 2
     dev = ok._hid       # the I2CDevice, for transit-key control
 
-    if args.wait_pin and not wait_for_unlock(ok):
+    if args.wait_pin and not wait_for_unlock(dev):
         sys.stderr.write("okfde: timed out waiting for PIN entry\n")
         return 2
 

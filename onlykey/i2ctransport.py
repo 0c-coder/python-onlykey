@@ -101,6 +101,15 @@ class I2CDevice(object):
             self._fd = open("/dev/i2c-%d" % self.bus, "r+b", buffering=0)
             fcntl.ioctl(self._fd, I2C_SLAVE, self.addr)
 
+    def status(self):
+        """Raw device status byte (ST_*).
+
+        This is the only way to observe a locked device: while locked, okic2_poll()
+        drops command frames without parsing them and sends no response, so there is
+        nothing to read back — the status byte reports ST_LOCKED instead.
+        """
+        return self._read_status()
+
     # --- transit key --------------------------------------------------------
     def set_transit_key(self, shared_secret):
         """Arm the single-use transit key from the X-Wing shared secret the host
