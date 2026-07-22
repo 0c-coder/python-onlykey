@@ -8,11 +8,25 @@ Slots:
   134 (RESERVED_KEY_XWING)  - X-Wing hybrid KEM
 """
 
+import hashlib
 import sys
 import time
 
 from onlykey.client import OnlyKey, Message
 from . import OKGETPUBKEY, OKDECRYPT, OKGENKEY, SLOT_MLKEM, SLOT_XWING
+
+KEYTYPE_MLKEM768 = 5
+KEYTYPE_XWING = 6
+
+
+def _challenge_digits(payload):
+    """Replicate the firmware's done_process_packets() challenge derivation
+    (okcore.cpp) so the 3 confirm buttons can be shown/known ahead of time
+    instead of requiring the user to read them off the device LED blinks.
+    temp = SHA256(plaintext payload); buttons come from temp[0]/temp[15]/temp[31].
+    """
+    digest = hashlib.sha256(bytes(payload)).digest()
+    return [str((digest[i] % 6) + 1) for i in (0, 15, 31)]
 
 # Sizes
 XWING_PK_SIZE = 1216
@@ -75,17 +89,39 @@ class OnlyKeyPQ:
 
         return bytes(result[:expected_size] if expected_size else result)
 
+    def _generate_keypair(self, slot, keytype, expected_size, timeout_ms=60000):
+        """Trigger on-device keygen for slot 133/134 (ML-KEM/X-Wing).
+
+        The firmware gates keygen behind the same 3-button challenge used by
+        decaps (set_private() -> ecc_priv_flash() -> process_packets(), see
+        okcore.cpp): the "all 0xFF" trigger payload primes the challenge and
+        the firmware replies with nothing until the 3 confirm buttons are
+        pressed on the device, at which point it completes the keygen and
+        sends the public key. The challenge digits are derived from
+        SHA256(payload) and computed here too so they can be shown/known
+        ahead of the (silent) device LED blink, rather than requiring the
+        user to read them off the device.
+        """
+        payload = bytearray([keytype]) + bytearray([0xFF] * 8)
+        digits = _challenge_digits(payload)
+        print(
+            f"Press these 3 OnlyKey buttons in order to confirm key generation: "
+            f"{digits[0]}, {digits[1]}, {digits[2]}",
+            file=sys.stderr,
+        )
+        pk = self._send_and_receive(
+            OKGENKEY, slot,
+            payload=payload,
+            expected_size=expected_size,
+            timeout_ms=timeout_ms,
+        )
+        if len(pk) != expected_size:
+            raise RuntimeError(f"keygen: got {len(pk)} bytes, expected {expected_size}")
+        return pk
+
     def xwing_keygen(self):
         """Generate X-Wing keypair. Returns 1216-byte public key."""
-        print("Press OnlyKey button to confirm key generation...", file=sys.stderr)
-        pk = self._send_and_receive(
-            OKGENKEY, SLOT_XWING,
-            expected_size=XWING_PK_SIZE,
-            timeout_ms=30000,
-        )
-        if len(pk) != XWING_PK_SIZE:
-            raise RuntimeError(f"X-Wing keygen: got {len(pk)} bytes, expected {XWING_PK_SIZE}")
-        return pk
+        return self._generate_keypair(SLOT_XWING, KEYTYPE_XWING, XWING_PK_SIZE)
 
     def xwing_getpubkey(self):
         """Get X-Wing public key. Returns 1216-byte public key."""
@@ -115,12 +151,7 @@ class OnlyKeyPQ:
 
     def mlkem_keygen(self):
         """Generate ML-KEM-768 keypair. Returns 1184-byte public key."""
-        print("Press OnlyKey button to confirm key generation...", file=sys.stderr)
-        return self._send_and_receive(
-            OKGENKEY, SLOT_MLKEM,
-            expected_size=MLKEM_PK_SIZE,
-            timeout_ms=30000,
-        )
+        return self._generate_keypair(SLOT_MLKEM, KEYTYPE_MLKEM768, MLKEM_PK_SIZE)
 
     def mlkem_getpubkey(self):
         """Get ML-KEM-768 public key. Returns 1184-byte public key."""
