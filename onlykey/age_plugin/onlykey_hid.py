@@ -104,8 +104,12 @@ class OnlyKeyPQ:
                     if expected_size and len(result) >= expected_size:
                         break
             except Exception:
-                if result:
-                    break
+                # A single read timing out mid-stream doesn't mean the
+                # device is done sending - keep polling until the real
+                # deadline. Bailing out early here (as soon as `result` was
+                # non-empty) was truncating multi-packet responses like the
+                # 1216-byte X-Wing pubkey whenever one 2s read happened to
+                # time out before the next packet arrived.
                 continue
 
         return bytes(result[:expected_size] if expected_size else result)
