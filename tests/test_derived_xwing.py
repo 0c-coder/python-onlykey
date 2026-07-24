@@ -66,9 +66,20 @@ def test_deterministic_recipient_per_seed():
 
 
 def test_derived_identity_roundtrip():
+    from onlykey.age_plugin import cli
+
     for label in ("age:personal", "alice@example.com", "work"):
         ident = dx.encode_identity(label)
-        assert ident.startswith("AGE-PLUGIN-ONLYKEY-DERIVED-")
+        # Must share the exact same "AGE-PLUGIN-ONLYKEY-1" prefix as a slot
+        # identity - `age` picks which plugin *binary* to invoke from that
+        # prefix text alone, so a distinct "...-DERIVED-1" HRP (bech32-valid
+        # or not) makes `age` look for a nonexistent
+        # `age-plugin-onlykey-derived` executable instead of the real,
+        # installed `age-plugin-onlykey` (confirmed live against a real
+        # `age -d` run - onlykey-testing's TC-17).
+        assert ident.startswith("AGE-PLUGIN-ONLYKEY-1")
         assert dx.decode_identity(ident) == {"derived": True, "label": label}
-    # a slot-style identity is not a derived identity
-    assert dx.decode_identity("AGE-PLUGIN-ONLYKEY-1QQQ") is None
+    # A real slot identity is not a derived identity, even sharing the same
+    # HRP - disambiguated by the marker byte in the decoded payload, not the
+    # prefix text (see _DERIVED_MARKER).
+    assert dx.decode_identity(cli.encode_identity(101)) is None
