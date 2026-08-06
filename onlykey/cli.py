@@ -29,6 +29,25 @@ from .client import OnlyKey, Message, MessageField
 
 only_key = OnlyKey()
 
+
+def _pqc_input_bytes(arg):
+    """Read a PQC operand given as a hex string or as a path to a file.
+
+    Same two-shapes rule `setpqc` already applies to its blob: a file is tried
+    as hex text first and taken as raw bytes if that fails, so both a
+    `.hex`-style dump and a raw binary file work. Accepting a path matters here
+    because an ML-KEM ciphertext is 1088 bytes - 2176 hex characters - which is
+    past what several shells will take as one argument.
+    """
+    if os.path.isfile(arg):
+        raw = open(arg, 'rb').read()
+        try:
+            return bytes.fromhex(raw.decode().strip())
+        except Exception:
+            return raw
+    return bytes.fromhex(arg.strip())
+
+
 def cli():
 
     logging.basicConfig(level=logging.DEBUG)
@@ -428,7 +447,7 @@ def cli():
                 slot_id = slotmap.get(sys.argv[2])
                 if not slot_id:
                     print('setpqc [RSA1-RSA4] [160-byte hex blob | file]')
-                    return
+                    sys.exit(1)
                 arg = sys.argv[3]
                 if os.path.isfile(arg):
                     raw = open(arg, 'rb').read()
@@ -438,12 +457,18 @@ def cli():
                         blob = raw
                 else:
                     blob = bytes.fromhex(arg.strip())
+                # Raises if the device refused the load. Before it did, this
+                # printed the success line below for a load the device had
+                # answered with three "Error not in config mode" replies, and
+                # exited 0 - there is no readback for a composite key
+                # (okcrypto_getpubkey() has no KEYTYPE_PQC_PGP branch), so a
+                # caller had no way at all to tell the two outcomes apart.
                 pqc.load_composite_key(only_key, slot_id, blob)
                 print('Loaded composite PQC PGP key (%d bytes) into %s' % (len(blob), sys.argv[2]))
             except Exception:
-                print(sys.exc_info()[0])
+                print(sys.exc_info()[1])
                 print('setpqc [RSA1-RSA4] [160-byte hex blob | file]')
-                return
+                sys.exit(1)
         elif sys.argv[1] == 'loadpqc':
             # Parse a composite PQC PGP private key FILE (via the OpenPGP.js bridge)
             # and load its 160-byte seed blob into an RSA slot. Needs Node.js.
@@ -455,7 +480,7 @@ def cli():
                 slot_id = slotmap.get(sys.argv[3]) if len(sys.argv) > 3 else 1
                 if not slot_id:
                     print('loadpqc <keyfile> [RSA1-RSA4] [passphrase]')
-                    return
+                    sys.exit(1)
                 passphrase = sys.argv[4] if len(sys.argv) > 4 else None
                 blob = pgp_bridge.composite_blob(path=keyfile, passphrase=passphrase)
                 pqc.load_composite_key(only_key, slot_id, blob)
@@ -464,7 +489,74 @@ def cli():
             except Exception:
                 print(sys.exc_info()[1])
                 print('loadpqc <keyfile> [RSA1-RSA4] [passphrase]')
-                return
+                sys.exit(1)
+        elif sys.argv[1] == 'signpqc':
+            # Sign a digest with ONE half of a composite PQC PGP key.
+            # signpqc [RSA1-RSA4] [ecc|pqc] [digest hex | file]
+            #   ecc -> Ed25519,    64-byte signature
+            #   pqc -> ML-DSA-65,  3309-byte signature
+            #
+            # This is the device PRIMITIVE, not a PGP message signer: a
+            # composite OpenPGP signature is the two halves concatenated, and
+            # assembling that packet is the caller's job (openpgp.js does it
+            # for the web app). Exposing the primitive is what lets a shell
+            # script, or an independent implementation's test harness, get a
+            # real signature out of the device at all.
+            try:
+                from . import pqc
+                slotmap = {'RSA1': 1, 'RSA2': 2, 'RSA3': 3, 'RSA4': 4}
+                halfmap = {'ecc': pqc.HALF_ECC, 'pqc': pqc.HALF_PQC}
+                if len(sys.argv) < 5:
+                    print('signpqc [RSA1-RSA4] [ecc|pqc] [digest hex | file]')
+                    sys.exit(1)
+                slot_id = slotmap.get(sys.argv[2])
+                half = halfmap.get(sys.argv[3].lower())
+                if not slot_id or half is None:
+                    print('signpqc [RSA1-RSA4] [ecc|pqc] [digest hex | file]')
+                    sys.exit(1)
+                digest = _pqc_input_bytes(sys.argv[4])
+                print('Press the three buttons shown on your OnlyKey to confirm signing...',
+                      file=sys.stderr)
+                sig = pqc.sign(only_key, slot_id, half, digest)
+                print(binascii.hexlify(sig).decode())
+            except SystemExit:
+                raise
+            except Exception:
+                print(sys.exc_info()[1])
+                print('signpqc [RSA1-RSA4] [ecc|pqc] [digest hex | file]')
+                sys.exit(1)
+        elif sys.argv[1] == 'decryptpqc':
+            # Decapsulate with ONE half of a composite PQC PGP key.
+            # decryptpqc [RSA1-RSA4] [hex | file]
+            #
+            # The device picks the half by INPUT SIZE - there is no selector:
+            #   32 bytes   -> X25519 ephemeral point -> 32-byte shared secret
+            #   1088 bytes -> ML-KEM-768 ciphertext  -> 32-byte shared secret
+            #
+            # Again a primitive. Recovering an OpenPGP session key from these
+            # needs the KMAC256("OpenPGPCompositeKDFv1") combine and an RFC 3394
+            # AES key-unwrap on top, which the caller does.
+            try:
+                from . import pqc
+                slotmap = {'RSA1': 1, 'RSA2': 2, 'RSA3': 3, 'RSA4': 4}
+                if len(sys.argv) < 4:
+                    print('decryptpqc [RSA1-RSA4] [32-byte X25519 point or 1088-byte ML-KEM ct: hex | file]')
+                    sys.exit(1)
+                slot_id = slotmap.get(sys.argv[2])
+                if not slot_id:
+                    print('decryptpqc [RSA1-RSA4] [hex | file]')
+                    sys.exit(1)
+                data = _pqc_input_bytes(sys.argv[3])
+                print('Press the three buttons shown on your OnlyKey to confirm decryption...',
+                      file=sys.stderr)
+                shared = pqc.decrypt(only_key, slot_id, data)
+                print(binascii.hexlify(shared).decode())
+            except SystemExit:
+                raise
+            except Exception:
+                print(sys.exc_info()[1])
+                print('decryptpqc [RSA1-RSA4] [hex | file]')
+                sys.exit(1)
         elif sys.argv[1] == 'wipekey':
             try:
                 if sys.argv[2] == 'RSA1':
