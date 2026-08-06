@@ -1053,10 +1053,10 @@ var openpgp = (function (exports) {
       ed25519: 27,
       /** Ed448 (Sign only) */
       ed448: 28,
-      /** Post-quantum ML-KEM-768 + X25519 (Encrypt only) */
-      pqc_mlkem_x25519: 105,
-      /** Post-quantum ML-DSA-64 + Ed25519 (Sign only) */
-      pqc_mldsa_ed25519: 107,
+      /** Post-quantum ML-DSA-65 + Ed25519 (Sign only) - IANA assigned, draft-ietf-openpgp-pqc */
+      pqc_mldsa_ed25519: 30,
+      /** Post-quantum ML-KEM-768 + X25519 (Encrypt only) - IANA assigned, draft-ietf-openpgp-pqc */
+      pqc_mlkem_x25519: 35,
 
       /** Persistent symmetric keys: encryption algorithm */
       aead: 128,
@@ -10593,11 +10593,12 @@ var openpgp = (function (exports) {
     switch (eccAlgo) {
       case enums.publicKey.pqc_mlkem_x25519: {
         const { ephemeralPublicKey: eccCipherText, sharedSecret: eccSharedSecret } = await generateEphemeralEncryptionMaterial(enums.publicKey.x25519, eccRecipientPublicKey);
-        const eccKeyShare = await hash$1.sha3_256(util.concatUint8Array([
-          eccSharedSecret,
-          eccCipherText,
-          eccRecipientPublicKey
-        ]));
+        // draft-ietf-openpgp-pqc-10, "X25519 KEM": the ECDH key share IS the
+        // raw X25519 shared secret. An earlier revision of the draft hashed it
+        // with the ciphertext and the recipient key; that extra SHA3-256 is one
+        // of the two reasons this fork's KEK differed from every conforming
+        // implementation's. See decaps$1 for the matching change.
+        const eccKeyShare = eccSharedSecret;
         return {
           eccCipherText,
           eccKeyShare
@@ -10611,13 +10612,13 @@ var openpgp = (function (exports) {
   async function decaps$1(eccAlgo, eccCipherText, eccSecretKey, eccPublicKey) {
     switch (eccAlgo) {
       case enums.publicKey.pqc_mlkem_x25519: {
+        // draft-ietf-openpgp-pqc-10, "X25519 KEM": the raw shared secret IS the
+        // key share - see encaps$1. recomputeSharedSecret() is where the
+        // hardware hook fires, so on an OnlyKey this is the device's own
+        // X25519 output used unchanged; the device contract is untouched by
+        // this correction, which is entirely host-side.
         const eccSharedSecret = await recomputeSharedSecret(enums.publicKey.x25519, eccCipherText, eccPublicKey, eccSecretKey);
-        const eccKeyShare = await hash$1.sha3_256(util.concatUint8Array([
-          eccSharedSecret,
-          eccCipherText,
-          eccPublicKey
-        ]));
-        return eccKeyShare;
+        return eccSharedSecret;
       }
       default:
         throw new Error('Unsupported KEM algorithm');
@@ -10729,20 +10730,33 @@ var openpgp = (function (exports) {
     return sessionKey;
   }
 
-  async function multiKeyCombine(algo, ecdhKeyShare, ecdhCipherText, ecdhPublicKey, mlkemKeyShare, mlkemCipherText, mlkemPublicKey) {
-    const { kmac256 } = await Promise.resolve().then(function () { return sha3Addons; });
-
-    const key = util.concatUint8Array([mlkemKeyShare, ecdhKeyShare]);
-    const encData = util.concatUint8Array([
-      mlkemCipherText,
-      ecdhCipherText,
-      mlkemPublicKey,
-      ecdhPublicKey,
-      new Uint8Array([algo])
-    ]);
+  // draft-ietf-openpgp-pqc-10, "Key Combiner":
+  //
+  //   KEK = SHA3-256( mlkemKeyShare || ecdhKeyShare ||
+  //                   ecdhCipherText || ecdhPublicKey ||
+  //                   algId || domSep || len(domSep) )
+  //
+  // An earlier revision of the draft used KMAC256 keyed on the two key shares,
+  // over an encData that ALSO carried mlkemCipherText and mlkemPublicKey, with
+  // the domain separator as the KMAC personalization. That is what this fork
+  // implemented, and it is why a message from any conforming implementation
+  // failed AES key unwrap here with "Key Data Integrity failed".
+  //
+  // `mlkemCipherText` and `mlkemPublicKey` are no longer inputs. The parameters
+  // are kept so the two call sites (encrypt$1 / decrypt$1) are untouched, which
+  // keeps this diff to the crypto it is about.
+  async function multiKeyCombine(algo, ecdhKeyShare, ecdhCipherText, ecdhPublicKey, mlkemKeyShare, mlkemCipherText, mlkemPublicKey) { // eslint-disable-line no-unused-vars
     const domainSeparation = util.encodeUTF8('OpenPGPCompositeKDFv1');
 
-    const kek = kmac256(key, encData, { personalization: domainSeparation }); // output length: 256 bits
+    const kek = await hash$1.sha3_256(util.concatUint8Array([
+      mlkemKeyShare,
+      ecdhKeyShare,
+      ecdhCipherText,
+      ecdhPublicKey,
+      new Uint8Array([algo]),
+      domainSeparation,
+      new Uint8Array([domainSeparation.length])
+    ]));
     return kek;
   }
 
