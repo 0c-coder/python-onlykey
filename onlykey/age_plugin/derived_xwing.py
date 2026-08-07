@@ -88,8 +88,7 @@ def ct_x_of(ciphertext):
 # "AGE-PLUGIN-ONLYKEY-DERIVED-<base32>" with no "1" bech32 separator and no
 # checksum, which `age` itself rejects outright before ever handing off to
 # the plugin ("invalid identity encoding: separator '1' at invalid
-# position") - confirmed live running an actual `age -d -i <file>` against
-# one, in onlykey-testing's TC-17.
+# position") - observed running an actual `age -d -i <file>` against one.
 #
 # Second, deeper issue found the same way, fixed here too: the HRP can't be
 # a distinct "age-plugin-onlykey-derived-" string either, even bech32-valid.

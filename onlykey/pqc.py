@@ -29,8 +29,11 @@ CRYPTO_AUTH reaches 4. The caller sends once and then waits — the firmware
 re-runs the operation itself from the third button press (OnlyKey.ino's
 OKSIGN/OKDECRYPT branches), so the request is NOT resent.
 
-The load path and both operations have been exercised end to end against
-hardware.
+Exercise status, because the two halves differ. The LOAD path - the chunked
+OKSETPRIV send in load_composite_key() - has run against a physical OnlyKey via
+`onlykey-cli setpqc`. The binary READ path below (read_exact, and therefore
+sign() and decrypt()) has been exercised against an emulated device only; it has
+not yet run against hardware.
 """
 import time
 
@@ -170,10 +173,11 @@ def read_exact(ok, want, timeout_ms=30000):
       * it is ``''.join(chr(b) for b in ... if b != 0)`` — it DROPS EVERY ZERO
         BYTE and returns str, so any signature or shared secret containing a
         0x00 comes back short and shifted; and
-      * ``read_bytes()`` underneath it is a SINGLE ``self._hid.read(n)`` of one
-        64-byte report with no reassembly, so ``read_string(...)[:3309]`` for an
-        ML-DSA-65 signature is impossible by construction rather than merely
-        unreliable — 64 bytes is the most it can ever return.
+      * ``read_bytes()`` underneath it is a SINGLE ``self._hid.read(n)`` with no
+        reassembly, and ``read_string()`` calls it with MAX_INPUT_REPORT_SIZE —
+        one report — so ``read_string(...)[:3309]`` for an ML-DSA-65 signature
+        is impossible by construction rather than merely unreliable: one
+        report's worth is the most it can ever return.
 
     The device sends a large response as consecutive 64-byte reports in one
     tight loop (``send_transport_response()``, okcore.cpp, ``outputmode == 0``),
@@ -224,8 +228,9 @@ def read_exact(ok, want, timeout_ms=30000):
 def decrypt(ok, slot, data, timeout_ms=None):
     """Composite decrypt. Send either the 32-byte X25519 ephemeral point (ECC half)
     or the 1088-byte ML-KEM ciphertext (PQC half); the device picks by size and
-    returns the 32-byte shared secret as BYTES. The caller does the KMAC combine
-    + AES key-unwrap (openpgp.js's kem.js does this for the web app).
+    returns the 32-byte shared secret as BYTES. The caller does the SHA3-256 key
+    combine + RFC 3394 AES key-unwrap (openpgp.js's kem.js does this for the web
+    app); see draft-ietf-openpgp-pqc-10 section 4.2.1 for the combiner.
 
     Raises the three-button confirmation on the device."""
     if len(data) not in (X25519_PT_LEN, MLKEM_CT_LEN):
@@ -251,6 +256,8 @@ def sign(ok, slot, component, digest, timeout_ms=None):
 
 def _op_timeout():
     # Dominated by the HUMAN, not the device: every composite operation waits on
-    # a three-button confirmation. ML-DSA keygen-from-seed + sign and ML-KEM
-    # keygen + decaps take a few hundred ms on the M4 either side of that.
+    # a three-button confirmation, so this budget is sized for a person reading
+    # three digits off the display and pressing them. The device-side work
+    # either side of that - ML-DSA keygen-from-seed then sign, or ML-KEM keygen
+    # then decapsulate - is small by comparison.
     return 30000

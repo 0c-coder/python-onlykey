@@ -75,8 +75,7 @@ def test_derived_identity_roundtrip():
         # prefix text alone, so a distinct "...-DERIVED-1" HRP (bech32-valid
         # or not) makes `age` look for a nonexistent
         # `age-plugin-onlykey-derived` executable instead of the real,
-        # installed `age-plugin-onlykey` (confirmed live against a real
-        # `age -d` run - onlykey-testing's TC-17).
+        # installed `age-plugin-onlykey` (observed against a real `age -d` run).
         assert ident.startswith("AGE-PLUGIN-ONLYKEY-1")
         assert dx.decode_identity(ident) == {"derived": True, "label": label}
     # A real slot identity is not a derived identity, even sharing the same

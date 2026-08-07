@@ -10593,10 +10593,10 @@ var openpgp = (function (exports) {
     switch (eccAlgo) {
       case enums.publicKey.pqc_mlkem_x25519: {
         const { ephemeralPublicKey: eccCipherText, sharedSecret: eccSharedSecret } = await generateEphemeralEncryptionMaterial(enums.publicKey.x25519, eccRecipientPublicKey);
-        // draft-ietf-openpgp-pqc-10, "X25519 KEM": the ECDH key share IS the
-        // raw X25519 shared secret - it is NOT hashed with the ciphertext and
-        // recipient key first, as an earlier revision of the draft specified.
-        // decaps$1 must agree with this exactly.
+        // draft-ietf-openpgp-pqc-10 section 4.1.1.1, x25519Kem.Encaps(): "Set
+        // the output ecdhKeyShare to X", the raw shared coordinate. It is NOT
+        // hashed with the ciphertext and recipient key first, which is what
+        // this fork used to do. decaps$1 must agree with this exactly.
         const eccKeyShare = eccSharedSecret;
         return {
           eccCipherText,
@@ -10729,15 +10729,18 @@ var openpgp = (function (exports) {
     return sessionKey;
   }
 
-  // draft-ietf-openpgp-pqc-10, "Key Combiner":
+  // draft-ietf-openpgp-pqc-10 section 4.2.1, "Key combiner", verbatim:
   //
   //   KEK = SHA3-256( mlkemKeyShare || ecdhKeyShare ||
   //                   ecdhCipherText || ecdhPublicKey ||
   //                   algId || domSep || len(domSep) )
   //
-  // NOT KMAC256, and NOT over the ML-KEM ciphertext or public key - an earlier
-  // revision of the draft specified both, and a KEK built that way fails AES
-  // key unwrap against any conforming implementation.
+  // domSep is the UTF-8 encoding of "OpenPGPCompositeKDFv1" and len(domSep) is
+  // a single octet, decimal 21.
+  //
+  // NOT KMAC256, and NOT over the ML-KEM ciphertext or public key. This fork
+  // previously used KMAC256 over data that included both, and a KEK built that
+  // way fails AES key unwrap against any conforming implementation.
   //
   // `mlkemCipherText` and `mlkemPublicKey` are therefore unused. They stay in
   // the signature so the two call sites (encrypt$1 / decrypt$1) need no change.

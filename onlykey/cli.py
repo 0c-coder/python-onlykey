@@ -534,8 +534,11 @@ def cli():
             #   1088 bytes -> ML-KEM-768 ciphertext  -> 32-byte shared secret
             #
             # Again a primitive. Recovering an OpenPGP session key from these
-            # needs the KMAC256("OpenPGPCompositeKDFv1") combine and an RFC 3394
-            # AES key-unwrap on top, which the caller does.
+            # needs the SHA3-256 key combine of draft-ietf-openpgp-pqc-10
+            # section 4.2.1 - over both key shares, the ECDH ciphertext and
+            # public key, the algorithm ID, and "OpenPGPCompositeKDFv1" with its
+            # length - and an RFC 3394 AES-256 key-unwrap on top, which the
+            # caller does.
             try:
                 from . import pqc
                 slotmap = {'RSA1': 1, 'RSA2': 2, 'RSA3': 3, 'RSA4': 4}
