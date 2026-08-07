@@ -457,12 +457,12 @@ def cli():
                         blob = raw
                 else:
                     blob = bytes.fromhex(arg.strip())
-                # Raises if the device refused the load. Before it did, this
-                # printed the success line below for a load the device had
-                # answered with three "Error not in config mode" replies, and
-                # exited 0 - there is no readback for a composite key
-                # (okcrypto_getpubkey() has no KEYTYPE_PQC_PGP branch), so a
-                # caller had no way at all to tell the two outcomes apart.
+                # Raises if the device refused the load, so the success line
+                # below is only ever printed for a load that happened. There is
+                # no readback for a composite key - okcrypto_getpubkey() has no
+                # KEYTYPE_PQC_PGP branch - so the device's own acknowledgement
+                # is the only thing that distinguishes a stored key from an
+                # empty slot.
                 pqc.load_composite_key(only_key, slot_id, blob)
                 print('Loaded composite PQC PGP key (%d bytes) into %s' % (len(blob), sys.argv[2]))
             except Exception:

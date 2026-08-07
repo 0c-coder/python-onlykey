@@ -29,9 +29,8 @@ CRYPTO_AUTH reaches 4. The caller sends once and then waits — the firmware
 re-runs the operation itself from the third button press (OnlyKey.ino's
 OKSIGN/OKDECRYPT branches), so the request is NOT resent.
 
-Status: the load path and both operations are verified end to end — on a Teensy
-3.2 on 2026-08-01 (alpha kit TC-11) and against the emulator on 2026-08-06
-(onlykey-testing 02-cli/05-composite-load, 06-composite-ops, 16-cli-key-files).
+The load path and both operations have been exercised end to end against
+hardware.
 """
 import time
 
@@ -120,9 +119,9 @@ def _await_load_reply(ok, timeout_ms=6000):
 
     It matters most for the refusal that is easy to hit by accident. OKSETPRIV
     is permitted only in config mode or on first use, and outside it the device
-    answers "Error not in config mode" to each of the three chunks. Those
-    replies were never read, so `setpqc` printed "Loaded composite PQC PGP key
-    (160 bytes) into RSA1" and exited 0 having loaded nothing at all.
+    answers "Error not in config mode" to each of the three chunks. A caller
+    that does not read those replies cannot distinguish a stored key from an
+    empty slot, and will report success for a load that did nothing.
     """
     seen = []
     last_error = None
@@ -187,7 +186,8 @@ def read_exact(ok, want, timeout_ms=30000):
     Once the response has started, a report may legitimately be all zeros or
     read as text, and dropping one of those would silently corrupt the result.
 
-    ``read_string()``'s own behaviour is untouched — 37 subcommands share it.
+    ``read_string()`` is deliberately left alone rather than fixed in place:
+    every other subcommand in the CLI depends on its current behaviour.
     """
     out = bytearray()
     started = False

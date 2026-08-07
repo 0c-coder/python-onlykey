@@ -1053,9 +1053,9 @@ var openpgp = (function (exports) {
       ed25519: 27,
       /** Ed448 (Sign only) */
       ed448: 28,
-      /** Post-quantum ML-DSA-65 + Ed25519 (Sign only) - IANA assigned, draft-ietf-openpgp-pqc */
+      /** Post-quantum ML-DSA-65 + Ed25519 (Sign only) - IANA assigned, draft-ietf-openpgp-pqc-10 */
       pqc_mldsa_ed25519: 30,
-      /** Post-quantum ML-KEM-768 + X25519 (Encrypt only) - IANA assigned, draft-ietf-openpgp-pqc */
+      /** Post-quantum ML-KEM-768 + X25519 (Encrypt only) - IANA assigned, draft-ietf-openpgp-pqc-10 */
       pqc_mlkem_x25519: 35,
 
       /** Persistent symmetric keys: encryption algorithm */
@@ -10594,10 +10594,9 @@ var openpgp = (function (exports) {
       case enums.publicKey.pqc_mlkem_x25519: {
         const { ephemeralPublicKey: eccCipherText, sharedSecret: eccSharedSecret } = await generateEphemeralEncryptionMaterial(enums.publicKey.x25519, eccRecipientPublicKey);
         // draft-ietf-openpgp-pqc-10, "X25519 KEM": the ECDH key share IS the
-        // raw X25519 shared secret. An earlier revision of the draft hashed it
-        // with the ciphertext and the recipient key; that extra SHA3-256 is one
-        // of the two reasons this fork's KEK differed from every conforming
-        // implementation's. See decaps$1 for the matching change.
+        // raw X25519 shared secret - it is NOT hashed with the ciphertext and
+        // recipient key first, as an earlier revision of the draft specified.
+        // decaps$1 must agree with this exactly.
         const eccKeyShare = eccSharedSecret;
         return {
           eccCipherText,
@@ -10613,10 +10612,10 @@ var openpgp = (function (exports) {
     switch (eccAlgo) {
       case enums.publicKey.pqc_mlkem_x25519: {
         // draft-ietf-openpgp-pqc-10, "X25519 KEM": the raw shared secret IS the
-        // key share - see encaps$1. recomputeSharedSecret() is where the
-        // hardware hook fires, so on an OnlyKey this is the device's own
-        // X25519 output used unchanged; the device contract is untouched by
-        // this correction, which is entirely host-side.
+        // key share - see encaps$1, which must agree. recomputeSharedSecret()
+        // is where the hardware hook fires, so on a hardware-backed key this is
+        // the device's own X25519 output used unchanged; everything above the
+        // raw shared secret is host-side.
         const eccSharedSecret = await recomputeSharedSecret(enums.publicKey.x25519, eccCipherText, eccPublicKey, eccSecretKey);
         return eccSharedSecret;
       }
@@ -10736,15 +10735,12 @@ var openpgp = (function (exports) {
   //                   ecdhCipherText || ecdhPublicKey ||
   //                   algId || domSep || len(domSep) )
   //
-  // An earlier revision of the draft used KMAC256 keyed on the two key shares,
-  // over an encData that ALSO carried mlkemCipherText and mlkemPublicKey, with
-  // the domain separator as the KMAC personalization. That is what this fork
-  // implemented, and it is why a message from any conforming implementation
-  // failed AES key unwrap here with "Key Data Integrity failed".
+  // NOT KMAC256, and NOT over the ML-KEM ciphertext or public key - an earlier
+  // revision of the draft specified both, and a KEK built that way fails AES
+  // key unwrap against any conforming implementation.
   //
-  // `mlkemCipherText` and `mlkemPublicKey` are no longer inputs. The parameters
-  // are kept so the two call sites (encrypt$1 / decrypt$1) are untouched, which
-  // keeps this diff to the crypto it is about.
+  // `mlkemCipherText` and `mlkemPublicKey` are therefore unused. They stay in
+  // the signature so the two call sites (encrypt$1 / decrypt$1) need no change.
   async function multiKeyCombine(algo, ecdhKeyShare, ecdhCipherText, ecdhPublicKey, mlkemKeyShare, mlkemCipherText, mlkemPublicKey) { // eslint-disable-line no-unused-vars
     const domainSeparation = util.encodeUTF8('OpenPGPCompositeKDFv1');
 
