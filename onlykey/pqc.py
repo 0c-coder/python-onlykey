@@ -23,9 +23,21 @@ Composite blob layout (160 bytes):
   [64:96] X25519 secret        (decrypt, ecc half)
   [96:160] ML-KEM-768 seed     (decrypt, pqc half)  FIPS 203 64-byte seed (d||z)
 
-UNTESTED against hardware — by inspection. Validate the framing on a device.
+Every operation here raises the device's three-button confirmation: okpqc_sign()
+and okpqc_decrypt() both prime on their first call and do nothing at all until
+CRYPTO_AUTH reaches 4. The caller sends once and then waits — the firmware
+re-runs the operation itself from the third button press (OnlyKey.ino's
+OKSIGN/OKDECRYPT branches), so the request is NOT resent.
+
+Exercise status, because the two halves differ. The LOAD path - the chunked
+OKSETPRIV send in load_composite_key() - has run against a physical OnlyKey via
+`onlykey-cli setpqc`. The binary READ path below (read_exact, and therefore
+sign() and decrypt()) has been exercised against an emulated device only; it has
+not yet run against hardware.
 """
-from .client import Message
+import time
+
+from .client import Message, MAX_INPUT_REPORT_SIZE
 
 # --- key type + layout (mirror okpqc.h) ---------------------------------------
 KEYTYPE_PQC_PGP   = 7
@@ -92,29 +104,160 @@ def load_composite_key(ok, slot, blob):
         ok.send_message(msg=Message.OKSETPRIV, slot_id=slot,
                         payload=bytearray([PQC_KEY_TYPE_BYTE]) + bytearray(chunk))
 
+    _await_load_reply(ok)
 
-def decrypt(ok, slot, data):
+
+# rsa_priv_flash()'s acknowledgement, printed once the accumulated chunks reach
+# the declared key size. The composite branch declares 160.
+_LOAD_OK = "Successfully set RSA Key"
+
+
+def _await_load_reply(ok, timeout_ms=6000):
+    """Require the device to acknowledge the load, and raise if it refused.
+
+    Without this the load is unverifiable from the host: okcrypto_getpubkey()
+    has no KEYTYPE_PQC_PGP branch, so a composite key cannot be read back, and
+    the only other evidence is asking the device to sign - which needs a button
+    press and so cannot be part of a load call.
+
+    It matters most for the refusal that is easy to hit by accident. OKSETPRIV
+    is permitted only in config mode or on first use, and outside it the device
+    answers "Error not in config mode" to each of the three chunks. A caller
+    that does not read those replies cannot distinguish a stored key from an
+    empty slot, and will report success for a load that did nothing.
+    """
+    seen = []
+    last_error = None
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline:
+        try:
+            data = ok.read_bytes(MAX_INPUT_REPORT_SIZE, to_bytes=True, timeout_ms=500)
+        except Exception as e:
+            # read_bytes() raises for a locked or uninitialised device and for
+            # several named device errors - each of those is a refused load -
+            # but it can also throw transiently on the read itself. Keep
+            # polling and report this only if nothing conclusive arrives, so a
+            # blip cannot fail a load that actually succeeded.
+            last_error = e
+            continue
+        if not data:
+            continue
+        text = bytes(data).split(b"\x00")[0].decode("ascii", "ignore").strip()
+        if not text:
+            continue
+        seen.append(text)
+        if text.startswith("Error"):
+            raise RuntimeError("OnlyKey refused the key load: %s" % text)
+        if _LOAD_OK in text:
+            return text
+
+    if last_error is not None and not seen:
+        raise RuntimeError("OnlyKey: %s" % last_error)
+    raise RuntimeError(
+        "OnlyKey did not acknowledge the key load (expected %r, saw %r)"
+        % (_LOAD_OK, seen))
+
+
+# Status broadcasts the device emits on its own schedule. A single read taken
+# right after OKSIGN/OKDECRYPT gets whichever report is first, which is how the
+# ASCII of "UNLOCKED" ends up where a signature belongs.
+_STATUS_PREFIXES = (b"UNLOCKED", b"INITIALIZED", b"UNINITIALIZED")
+
+
+def read_exact(ok, want, timeout_ms=30000):
+    """Read exactly ``want`` bytes of BINARY response, reassembled across reports.
+
+    ``read_string()`` cannot be used for any of this, for two independent
+    reasons, and neither is a matter of probability:
+
+      * it is ``''.join(chr(b) for b in ... if b != 0)`` — it DROPS EVERY ZERO
+        BYTE and returns str, so any signature or shared secret containing a
+        0x00 comes back short and shifted; and
+      * ``read_bytes()`` underneath it is a SINGLE ``self._hid.read(n)`` with no
+        reassembly, and ``read_string()`` calls it with MAX_INPUT_REPORT_SIZE —
+        one report — so ``read_string(...)[:3309]`` for an ML-DSA-65 signature
+        is impossible by construction rather than merely unreliable: one
+        report's worth is the most it can ever return.
+
+    The device sends a large response as consecutive 64-byte reports in one
+    tight loop (``send_transport_response()``, okcore.cpp, ``outputmode == 0``),
+    so a 3309-byte signature arrives as 52 reports and nothing interleaves with
+    them. This is the same collect-until-expected-size loop the age plugin's
+    ``OnlyKeyPQ._read_response()`` uses for the 1216-byte X-Wing pubkey, with
+    one addition it does not need: leading status broadcasts are skipped.
+
+    Skipping is deliberately confined to the reports BEFORE the first data byte.
+    Once the response has started, a report may legitimately be all zeros or
+    read as text, and dropping one of those would silently corrupt the result.
+
+    ``read_string()`` is deliberately left alone rather than fixed in place:
+    every other subcommand in the CLI depends on its current behaviour.
+    """
+    out = bytearray()
+    started = False
+    last_error = None
+    deadline = time.time() + timeout_ms / 1000.0
+    while time.time() < deadline and len(out) < want:
+        try:
+            data = ok.read_bytes(MAX_INPUT_REPORT_SIZE, to_bytes=True, timeout_ms=2000)
+        except Exception as e:
+            # A read timing out mid-stream does not mean the device is done;
+            # keep going to the real deadline. read_bytes() also raises for a
+            # locked/uninitialised device, which is worth reporting if nothing
+            # ever arrives - so remember it rather than discarding it.
+            last_error = e
+            continue
+        if not data:
+            continue
+        data = bytes(data)
+        if data.startswith(b"Error"):
+            raise RuntimeError("OnlyKey: %s" % data.split(b"\x00")[0].decode("ascii", "ignore").strip())
+        if not started:
+            if data.startswith(_STATUS_PREFIXES) or not any(data):
+                continue
+            started = True
+        out.extend(data)
+
+    if len(out) < want:
+        if not started and last_error is not None:
+            raise last_error
+        raise RuntimeError("OnlyKey: got %d of %d bytes" % (len(out), want))
+    return bytes(out[:want])
+
+
+def decrypt(ok, slot, data, timeout_ms=None):
     """Composite decrypt. Send either the 32-byte X25519 ephemeral point (ECC half)
     or the 1088-byte ML-KEM ciphertext (PQC half); the device picks by size and
-    returns the 32-byte shared secret. openpgp.js does the KMAC combine + unwrap."""
+    returns the 32-byte shared secret as BYTES. The caller does the SHA3-256 key
+    combine + RFC 3394 AES key-unwrap (openpgp.js's kem.js does this for the web
+    app); see draft-ietf-openpgp-pqc-10 section 4.2.1 for the combiner.
+
+    Raises the three-button confirmation on the device."""
     if len(data) not in (X25519_PT_LEN, MLKEM_CT_LEN):
         raise ValueError("decrypt input must be %d (X25519 point) or %d (ML-KEM ct) bytes"
                          % (X25519_PT_LEN, MLKEM_CT_LEN))
-    ok.send_large_message2(msg=Message.OKDECRYPT, slot_id=slot, payload=data)
-    return ok.read_string(timeout_ms=_op_timeout(len(data)))[:SS_LEN]
+    ok.send_large_message2(msg=Message.OKDECRYPT, slot_id=slot, payload=list(bytes(data)))
+    return read_exact(ok, SS_LEN, timeout_ms or _op_timeout())
 
 
-def sign(ok, slot, component, digest):
+def sign(ok, slot, component, digest, timeout_ms=None):
     """Composite sign. component = HALF_ECC (Ed25519) or HALF_PQC (ML-DSA-65).
-    Payload is [selector] + digest; returns the 64-byte or 3309-byte signature."""
+    Payload is [selector] + digest; returns the 64-byte or 3309-byte signature
+    as BYTES.
+
+    Raises the three-button confirmation on the device."""
     if component not in (HALF_ECC, HALF_PQC):
         raise ValueError("component must be HALF_ECC(0) or HALF_PQC(1)")
     payload = bytes([component]) + bytes(digest)
-    ok.send_large_message2(msg=Message.OKSIGN, slot_id=slot, payload=payload)
+    ok.send_large_message2(msg=Message.OKSIGN, slot_id=slot, payload=list(payload))
     want = ED25519_SIG_LEN if component == HALF_ECC else MLDSA_SIG_LEN
-    return ok.read_string(timeout_ms=_op_timeout(want))[:want]
+    return read_exact(ok, want, timeout_ms or _op_timeout())
 
 
-def _op_timeout(nbytes):
-    # ML-DSA keygen-from-seed + sign, or ML-KEM keygen + decaps, take a few 100 ms on the M4.
-    return 8000 if nbytes >= MLKEM_CT_LEN or nbytes >= MLDSA_SIG_LEN else 4000
+def _op_timeout():
+    # Dominated by the HUMAN, not the device: every composite operation waits on
+    # a three-button confirmation, so this budget is sized for a person reading
+    # three digits off the display and pressing them. The device-side work
+    # either side of that - ML-DSA keygen-from-seed then sign, or ML-KEM keygen
+    # then decapsulate - is small by comparison.
+    return 30000

@@ -96,17 +96,25 @@ class OnlyKeyPQ:
         while time.time() < deadline:
             try:
                 data = self.ok.read_bytes(64, timeout_ms=2000)
-                if data:
-                    text = bytes(data).decode("ascii", errors="ignore")
-                    if text.startswith("Error"):
-                        raise RuntimeError(f"OnlyKey: {text.strip()}")
-                    result.extend(data)
-                    if expected_size and len(result) >= expected_size:
-                        break
             except Exception:
-                if result:
-                    break
+                # A single read timing out mid-stream doesn't mean the
+                # device is done sending - keep polling until the real
+                # deadline. Bailing out early here (as soon as `result` was
+                # non-empty) was truncating multi-packet responses like the
+                # 1216-byte X-Wing pubkey whenever one 2s read happened to
+                # time out before the next packet arrived. This only guards
+                # the read() call itself - a real device-reported error
+                # (below) still needs to propagate immediately, not get
+                # silently swallowed by a broad except around both.
                 continue
+            if not data:
+                continue
+            text = bytes(data).decode("ascii", errors="ignore")
+            if text.startswith("Error"):
+                raise RuntimeError(f"OnlyKey: {text.strip()}")
+            result.extend(data)
+            if expected_size and len(result) >= expected_size:
+                break
 
         return bytes(result[:expected_size] if expected_size else result)
 

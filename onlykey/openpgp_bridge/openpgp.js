@@ -1053,10 +1053,10 @@ var openpgp = (function (exports) {
       ed25519: 27,
       /** Ed448 (Sign only) */
       ed448: 28,
-      /** Post-quantum ML-KEM-768 + X25519 (Encrypt only) */
-      pqc_mlkem_x25519: 105,
-      /** Post-quantum ML-DSA-64 + Ed25519 (Sign only) */
-      pqc_mldsa_ed25519: 107,
+      /** Post-quantum ML-DSA-65 + Ed25519 (Sign only) - IANA assigned, draft-ietf-openpgp-pqc-10 */
+      pqc_mldsa_ed25519: 30,
+      /** Post-quantum ML-KEM-768 + X25519 (Encrypt only) - IANA assigned, draft-ietf-openpgp-pqc-10 */
+      pqc_mlkem_x25519: 35,
 
       /** Persistent symmetric keys: encryption algorithm */
       aead: 128,
@@ -10593,11 +10593,11 @@ var openpgp = (function (exports) {
     switch (eccAlgo) {
       case enums.publicKey.pqc_mlkem_x25519: {
         const { ephemeralPublicKey: eccCipherText, sharedSecret: eccSharedSecret } = await generateEphemeralEncryptionMaterial(enums.publicKey.x25519, eccRecipientPublicKey);
-        const eccKeyShare = await hash$1.sha3_256(util.concatUint8Array([
-          eccSharedSecret,
-          eccCipherText,
-          eccRecipientPublicKey
-        ]));
+        // draft-ietf-openpgp-pqc-10 section 4.1.1.1, x25519Kem.Encaps(): "Set
+        // the output ecdhKeyShare to X", the raw shared coordinate. It is NOT
+        // hashed with the ciphertext and recipient key first, which is what
+        // this fork used to do. decaps$1 must agree with this exactly.
+        const eccKeyShare = eccSharedSecret;
         return {
           eccCipherText,
           eccKeyShare
@@ -10611,13 +10611,13 @@ var openpgp = (function (exports) {
   async function decaps$1(eccAlgo, eccCipherText, eccSecretKey, eccPublicKey) {
     switch (eccAlgo) {
       case enums.publicKey.pqc_mlkem_x25519: {
+        // draft-ietf-openpgp-pqc-10, "X25519 KEM": the raw shared secret IS the
+        // key share - see encaps$1, which must agree. recomputeSharedSecret()
+        // is where the hardware hook fires, so on a hardware-backed key this is
+        // the device's own X25519 output used unchanged; everything above the
+        // raw shared secret is host-side.
         const eccSharedSecret = await recomputeSharedSecret(enums.publicKey.x25519, eccCipherText, eccPublicKey, eccSecretKey);
-        const eccKeyShare = await hash$1.sha3_256(util.concatUint8Array([
-          eccSharedSecret,
-          eccCipherText,
-          eccPublicKey
-        ]));
-        return eccKeyShare;
+        return eccSharedSecret;
       }
       default:
         throw new Error('Unsupported KEM algorithm');
@@ -10729,20 +10729,33 @@ var openpgp = (function (exports) {
     return sessionKey;
   }
 
-  async function multiKeyCombine(algo, ecdhKeyShare, ecdhCipherText, ecdhPublicKey, mlkemKeyShare, mlkemCipherText, mlkemPublicKey) {
-    const { kmac256 } = await Promise.resolve().then(function () { return sha3Addons; });
-
-    const key = util.concatUint8Array([mlkemKeyShare, ecdhKeyShare]);
-    const encData = util.concatUint8Array([
-      mlkemCipherText,
-      ecdhCipherText,
-      mlkemPublicKey,
-      ecdhPublicKey,
-      new Uint8Array([algo])
-    ]);
+  // draft-ietf-openpgp-pqc-10 section 4.2.1, "Key combiner", verbatim:
+  //
+  //   KEK = SHA3-256( mlkemKeyShare || ecdhKeyShare ||
+  //                   ecdhCipherText || ecdhPublicKey ||
+  //                   algId || domSep || len(domSep) )
+  //
+  // domSep is the UTF-8 encoding of "OpenPGPCompositeKDFv1" and len(domSep) is
+  // a single octet, decimal 21.
+  //
+  // NOT KMAC256, and NOT over the ML-KEM ciphertext or public key. This fork
+  // previously used KMAC256 over data that included both, and a KEK built that
+  // way fails AES key unwrap against any conforming implementation.
+  //
+  // `mlkemCipherText` and `mlkemPublicKey` are therefore unused. They stay in
+  // the signature so the two call sites (encrypt$1 / decrypt$1) need no change.
+  async function multiKeyCombine(algo, ecdhKeyShare, ecdhCipherText, ecdhPublicKey, mlkemKeyShare, mlkemCipherText, mlkemPublicKey) { // eslint-disable-line no-unused-vars
     const domainSeparation = util.encodeUTF8('OpenPGPCompositeKDFv1');
 
-    const kek = kmac256(key, encData, { personalization: domainSeparation }); // output length: 256 bits
+    const kek = await hash$1.sha3_256(util.concatUint8Array([
+      mlkemKeyShare,
+      ecdhKeyShare,
+      ecdhCipherText,
+      ecdhPublicKey,
+      new Uint8Array([algo]),
+      domainSeparation,
+      new Uint8Array([domainSeparation.length])
+    ]));
     return kek;
   }
 
