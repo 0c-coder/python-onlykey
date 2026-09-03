@@ -196,9 +196,13 @@ User input required to use a stored key (RSA slots 1-4, ECC slots 101-132 - any 
 [More info](https://docs.crp.to/usersguide.html#stored-challenge-mode)
 
 #### derivedkeymode [num]
-User input required to use a derived key (SSH/GPG agent identities, derived X-Wing age decrypt over USB)
+User input required to use a derived key (SSH/GPG agent identities)
 0 = Challenge Code Required; 1 = Button Press Required (default); 2 = No press (as above)
 [More info](https://docs.crp.to/usersguide.html#derived-challenge-mode)
+
+#### webderivemode [num]
+User input required to use a web derived key - the OnlyKey web app / OnlyAgent in the browser, and derived X-Wing age decrypt via age-plugin-onlykey. The key itself never changes with this setting.
+0 = Challenge Code Required (the web app / age plugin shows the 3 digits); 1 = Button Press Required; 2 = No press (default - press-free per-site decryption)
 
 #### hmackeymode [num]
 Enable or disable button press for HMAC challenge-response

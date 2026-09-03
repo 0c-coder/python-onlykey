@@ -623,12 +623,15 @@ def cli():
             only_key.setslot(1, MessageField.TOUCHSENSE, int(sys.argv[2]))
         elif sys.argv[1] == '2ndprofilemode':
              only_key.setslot(1, MessageField.SECPROFILEMODE, int(sys.argv[2]))
-        elif sys.argv[1] in ('storedkeymode', 'derivedkeymode'):
-            # User input mode: 0 = challenge code, 1 = button press, 2 = no
-            # press (only honoured by firmware built with OK_ALLOW_NO_PRESS,
-            # otherwise the device answers "Error unsupported user input mode").
+        elif sys.argv[1] in ('storedkeymode', 'derivedkeymode', 'webderivemode'):
+            # User input mode, one enum for all three: 0 = challenge code,
+            # 1 = button press, 2 = no press. For stored/derived keys, 2 is only
+            # honoured by firmware built with OK_ALLOW_NO_PRESS (the device
+            # answers "Error unsupported user input mode" otherwise); for web
+            # derived keys it is the default. The key never depends on it.
             field = {'storedkeymode': MessageField.PGPCHALENGEMODE,
-                     'derivedkeymode': MessageField.SSHCHALENGEMODE}[sys.argv[1]]
+                     'derivedkeymode': MessageField.SSHCHALENGEMODE,
+                     'webderivemode': MessageField.WEBDERIVEMODE}[sys.argv[1]]
             if len(sys.argv) < 3 or sys.argv[2] not in ('0', '1', '2'):
                 print('%s [0 = challenge code | 1 = button press | 2 = no press]' % sys.argv[1])
                 sys.exit(1)
@@ -1265,6 +1268,11 @@ def cli():
             elif data[0] == 'derivedkeymode':
                 try:
                     only_key.setslot(1, MessageField.SSHCHALENGEMODE, int(data[1]))
+                except:
+                    continue
+            elif data[0] == 'webderivemode':
+                try:
+                    only_key.setslot(1, MessageField.WEBDERIVEMODE, int(data[1]))
                 except:
                     continue
             elif data[0] == 'backupkeymode':
