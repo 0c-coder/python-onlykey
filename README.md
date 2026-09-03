@@ -202,7 +202,7 @@ User input required to use a derived key (SSH/GPG agent identities)
 
 #### webderivemode [num]
 User input required to use a web derived key - the OnlyKey web app / OnlyAgent in the browser, and derived X-Wing age decrypt via age-plugin-onlykey. The key itself never changes with this setting.
-0 = Challenge Code Required (the web app / age plugin shows the 3 digits); 1 = Button Press Required; 2 = No press (default - press-free per-site decryption)
+0 = Challenge Code Required (the web app / age plugin shows the 3 digits); 1 = Button Press Required (default); 2 = No press (press-free per-site decryption)
 
 #### hmackeymode [num]
 Enable or disable button press for HMAC challenge-response

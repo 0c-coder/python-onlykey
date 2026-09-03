@@ -628,7 +628,8 @@ def cli():
             # 1 = button press, 2 = no press. For stored/derived keys, 2 is only
             # honoured by firmware built with OK_ALLOW_NO_PRESS (the device
             # answers "Error unsupported user input mode" otherwise); for web
-            # derived keys it is the default. The key never depends on it.
+            # derived keys it is always allowed. Default for all three is 1. The
+            # key never depends on it.
             field = {'storedkeymode': MessageField.PGPCHALENGEMODE,
                      'derivedkeymode': MessageField.SSHCHALENGEMODE,
                      'webderivemode': MessageField.WEBDERIVEMODE}[sys.argv[1]]
