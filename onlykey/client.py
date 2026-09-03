@@ -204,7 +204,6 @@ class MessageField(Enum):
     SECPROFILEMODE = 23
     PGPCHALENGEMODE = 22   # stored-key user input mode
     SSHCHALENGEMODE = 21   # derived-key user input mode
-    WEBDERIVEMODE = 30     # web (FIDO2) derived-key user input mode
     BACKUPMODE = 20
     TOUCHSENSE = 28
 

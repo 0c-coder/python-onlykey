@@ -200,10 +200,6 @@ User input required to use a derived key (SSH/GPG agent identities, derived X-Wi
 0 = Challenge Code Required; 1 = Button Press Required (default); 2 = No press (as above)
 [More info](https://docs.crp.to/usersguide.html#derived-challenge-mode)
 
-#### webderivemode [num]
-User input required for web (WebAuthn/FIDO2) derived keys used by the OnlyKey web app and OnlyAgent
-0 = Challenge Code Required (the web app shows the code); 1 = Button Press Required for every operation; 2 = No press, the web app chooses per request (default)
-
 #### hmackeymode [num]
 Enable or disable button press for HMAC challenge-response
 0 = Button Press Required (default); 1 = Button Press Not Required.
