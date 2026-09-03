@@ -207,7 +207,16 @@ class OnlyKeyPQ:
         if len(ct_x) != 32:
             raise ValueError(f"ct_X must be 32 bytes, got {len(ct_x)}")
         tag = derived_label_tag(label)
-        print("Press OnlyKey button if prompted...", file=sys.stderr)
+        # The firmware now gates this on user presence like every other
+        # OKDECRYPT (libraries fix/derived-xwing-led-fade). In the default
+        # challenge mode it wants the 3-digit code derived exactly as
+        # done_process_packets() does: SHA-256 over the request payload,
+        # bytes 0/15/31 mod 6, plus one. In derivedkeymode 1 any press works.
+        payload = tag + bytes(ct_x)
+        h = hashlib.sha256(payload).digest()
+        code = " ".join(str(h[i] % 6 + 1) for i in (0, 15, 31))
+        print(f"Confirm on OnlyKey: enter challenge {code} "
+              f"(or press any button if derivedkeymode is 1)", file=sys.stderr)
         self.ok.send_large_message2(
             msg=Message(OKDECRYPT), payload=list(tag + bytes(ct_x)),
             slot_id=RESERVED_KEY_WEB_DERIVATION,

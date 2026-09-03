@@ -191,14 +191,18 @@ WARNING: Setting button's touch sensitivity lower than 5 is not recommended as t
 Set during init (Initial Configuration) to set 2nd profile type 1 = standard (default); 2 = plausible deniability
 
 #### storedkeymode [num]
-Enable or disable challenge for stored keys (SSH/PGP)
-0 = Challenge Code Required (default); 1 = Button Press Required
+User input required to use a stored key (RSA slots 1-4, ECC slots 101-132 - any protocol: SSH, PGP, age, composite PQC)
+0 = Challenge Code Required; 1 = Button Press Required (default); 2 = No press (unattended agents - only honoured by firmware built with OK_ALLOW_NO_PRESS, refused otherwise)
 [More info](https://docs.crp.to/usersguide.html#stored-challenge-mode)
 
 #### derivedkeymode [num]
-Enable or disable challenge for stored keys (SSH/PGP)
-0 = Challenge Code Required (default); 1 = Button Press Required
+User input required to use a derived key (SSH/GPG agent identities, derived X-Wing age decrypt over USB)
+0 = Challenge Code Required; 1 = Button Press Required (default); 2 = No press (as above)
 [More info](https://docs.crp.to/usersguide.html#derived-challenge-mode)
+
+#### webderivemode [num]
+User input required for web (WebAuthn/FIDO2) derived keys used by the OnlyKey web app and OnlyAgent
+0 = Challenge Code Required (the web app shows the code); 1 = Button Press Required for every operation; 2 = No press, the web app chooses per request (default)
 
 #### hmackeymode [num]
 Enable or disable button press for HMAC challenge-response
